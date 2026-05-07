@@ -19,3 +19,5 @@ export class AuthController {
     return this.authService.register(req);
   }
 }
+
+import { UnauthorizedException } from '@nestjs/common';

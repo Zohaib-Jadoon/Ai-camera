@@ -33,23 +33,21 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('detection')
   async handleDetection(client: Socket, payload: any) {
     this.logger.log(`Received detection: ${JSON.stringify(payload)}`);
-
-    // Save to DB
     const detection = await this.eventsService.createDetection(payload);
-
-    // Check for rules/alerts (simplified logic)
-    if (payload.object_type === 'human' && payload.confidence > 0.8) {
-        const alert = await this.alertsService.createAlert({
-            event_id: detection.id,
-            alert_type: 'INTRUSION',
-            camera_id: detection.cameraId,
-            confidence: detection.confidence,
-            snapshot_url: detection.snapshotUrl,
-        });
-        this.server.emit('alert', alert);
-    }
-
-    // Broadcast detection to all clients (for live overlays)
     this.server.emit('detection_update', detection);
+  }
+
+  @SubscribeMessage('face_event')
+  async handleFaceEvent(client: Socket, payload: any) {
+    this.logger.log(`Received face event: ${JSON.stringify(payload)}`);
+    // Logic to save face event could go here
+    this.server.emit('face_update', payload);
+  }
+
+  @SubscribeMessage('alert')
+  async handleAlert(client: Socket, payload: any) {
+    this.logger.log(`Received alert: ${JSON.stringify(payload)}`);
+    const alert = await this.alertsService.createAlert(payload);
+    this.server.emit('alert', alert);
   }
 }

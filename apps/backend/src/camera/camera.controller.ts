@@ -27,7 +27,7 @@ export class CameraController {
   }
 
   @Delete(':id')
-  remove(@Param('id') id: string): Promise<void> {
+  async remove(@Param('id') id: string): Promise<void> {
     return this.cameraService.remove(id);
   }
 }
