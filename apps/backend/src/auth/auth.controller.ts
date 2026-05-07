@@ -1,4 +1,4 @@
-import { Controller, Post, Body } from '@nestjs/common';
+import { Controller, Post, Body, UseGuards, Get, Request } from '@nestjs/common';
 import { AuthService } from './auth.service';
 
 @Controller('auth')
@@ -7,7 +7,17 @@ export class AuthController {
 
   @Post('login')
   async login(@Body() req: any) {
-    // In a real app, validate user credentials here
-    return this.authService.login({ email: req.email, userId: '1', role: 'ADMIN' });
+    const user = await this.authService.validateUser(req.email, req.password);
+    if (!user) {
+      throw new UnauthorizedException();
+    }
+    return this.authService.login(user);
+  }
+
+  @Post('register')
+  async register(@Body() req: any) {
+    return this.authService.register(req);
   }
 }
+
+import { UnauthorizedException } from '@nestjs/common';

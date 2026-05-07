@@ -1,0 +1,90 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  SECURITY_OPERATOR
+  VIEWER
+}
+
+model User {
+  id       String @id @default(uuid())
+  name     String
+  email    String @unique
+  password String
+  role     Role   @default(VIEWER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Camera {
+  id        String @id @default(uuid())
+  name      String
+  rtsp_url  String
+  status    String @default("OFFLINE")
+  location  String?
+  zones     Zone[]
+  detections Detection[]
+  faceEvents FaceEvent[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Zone {
+  id             String @id @default(uuid())
+  camera_id      String
+  camera         Camera @relation(fields: [camera_id], references: [id])
+  polygon_points Json
+  rule_type      String
+  createdAt      DateTime @default(now())
+}
+
+model Detection {
+  id           String @id @default(uuid())
+  camera_id    String
+  camera       Camera @relation(fields: [camera_id], references: [id])
+  object_type  String
+  confidence   Float
+  timestamp    DateTime @default(now())
+  snapshot_url String?
+}
+
+model Person {
+  id             String @id @default(uuid())
+  name           String
+  tag            String?
+  faceEmbeddings FaceEmbedding[]
+  faceEvents     FaceEvent[]
+  createdAt      DateTime @default(now())
+}
+
+model FaceEmbedding {
+  id               String @id @default(uuid())
+  person_id        String
+  person           Person @relation(fields: [person_id], references: [id])
+  embedding_vector Float[]
+}
+
+model FaceEvent {
+  id         String @id @default(uuid())
+  camera_id  String
+  camera     Camera @relation(fields: [camera_id], references: [id])
+  person_id  String?
+  person     Person? @relation(fields: [person_id], references: [id])
+  confidence Float
+  timestamp  DateTime @default(now())
+}
+
+model Alert {
+  id          String @id @default(uuid())
+  event_id    String
+  alert_type  String
+  status      String @default("PENDING")
+  sent_at     DateTime @default(now())
+}
