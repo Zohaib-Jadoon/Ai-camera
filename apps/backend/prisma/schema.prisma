@@ -1,0 +1,84 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id       String @id @default(uuid())
+  name     String
+  email    String @unique
+  password String
+  role     String @default("VIEWER") // ADMIN, SECURITY_OPERATOR, VIEWER
+}
+
+model Camera {
+  id        String @id @default(uuid())
+  name      String
+  rtspUrl   String @map("rtsp_url")
+  status    String @default("OFFLINE")
+  location  String?
+  group     String?
+  zones     Zone[]
+  detections Detection[]
+  faceEvents FaceEvent[]
+}
+
+model Zone {
+  id            String @id @default(uuid())
+  camera        Camera @relation(fields: [cameraId], references: [id])
+  cameraId      String @map("camera_id")
+  name          String
+  polygonPoints Json   @map("polygon_points")
+  ruleType      String @map("rule_type") // HUMAN_ENTRY, VEHICLE_ENTRY, LOITERING, CROSS_LINE
+}
+
+model Detection {
+  id          String   @id @default(uuid())
+  camera      Camera   @relation(fields: [cameraId], references: [id])
+  cameraId    String   @map("camera_id")
+  objectType  String   @map("object_type")
+  confidence  Float
+  timestamp   DateTime @default(now())
+  snapshotUrl String?  @map("snapshot_url")
+  bbox        Json?
+}
+
+model Person {
+  id             String          @id @default(uuid())
+  name           String
+  tag            String          // EMPLOYEE, FAMILY, VISITOR, VIP, BLACKLISTED
+  faceEmbeddings FaceEmbedding[]
+  faceEvents     FaceEvent[]
+}
+
+model FaceEmbedding {
+  id        String @id @default(uuid())
+  person    Person @relation(fields: [personId], references: [id])
+  personId  String @map("person_id")
+  embedding Json
+}
+
+model FaceEvent {
+  id          String   @id @default(uuid())
+  camera      Camera   @relation(fields: [cameraId], references: [id])
+  cameraId    String   @map("camera_id")
+  person      Person?  @relation(fields: [personId], references: [id])
+  personId    String?  @map("person_id")
+  confidence  Float
+  timestamp   DateTime @default(now())
+  snapshotUrl String?  @map("snapshot_url")
+}
+
+model Alert {
+  id          String   @id @default(uuid())
+  eventId     String   @map("event_id")
+  alertType   String   @map("alert_type") // INTRUSION, UNKNOWN_PERSON, WATCHLIST_PERSON, LOITERING
+  status      String   @default("NEW")     // NEW, ACKNOWLEDGED, RESOLVED
+  cameraId    String   @map("camera_id")
+  timestamp   DateTime @default(now())
+  snapshotUrl String?  @map("snapshot_url")
+  confidence  Float
+}

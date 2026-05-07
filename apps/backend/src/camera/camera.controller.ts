@@ -1,6 +1,6 @@
 import { Controller, Get, Post, Body, Put, Param, Delete } from '@nestjs/common';
 import { CameraService } from './camera.service';
-import { Camera } from './camera.entity';
+import { Camera } from '@prisma/client';
 
 @Controller('cameras')
 export class CameraController {
@@ -17,12 +17,12 @@ export class CameraController {
   }
 
   @Post()
-  create(@Body() camera: Partial<Camera>): Promise<Camera> {
+  create(@Body() camera: any): Promise<Camera> {
     return this.cameraService.create(camera);
   }
 
   @Put(':id')
-  update(@Param('id') id: string, @Body() camera: Partial<Camera>): Promise<Camera | null> {
+  update(@Param('id') id: string, @Body() camera: any): Promise<Camera | null> {
     return this.cameraService.update(id, camera);
   }
 
