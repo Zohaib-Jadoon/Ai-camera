@@ -10,8 +10,8 @@ echo               MADAD VISION AI - MULTI-SERVICE SYSTEM
 echo ==============================================================
 echo.
 echo  [1] QUICK START  - Launch Dev Servers Instantly (Skip Installs)
-echo  [2] FULL SETUP   - Install Dependencies, Generate Client, & Launch
-echo  [3] BUILD        - Compile Production Code (Next.js & NestJS)
+echo  [2] FULL SETUP   - Install Dependencies, Generate Client, ^& Launch
+echo  [3] BUILD        - Compile Production Code (Next.js ^& NestJS)
 echo  [4] EXIT         - Close Launcher
 echo.
 echo ==============================================================
