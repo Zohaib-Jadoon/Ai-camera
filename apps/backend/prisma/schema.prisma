@@ -13,78 +13,329 @@ enum Role {
   VIEWER
 }
 
+enum CameraStatus {
+  ONLINE
+  OFFLINE
+  ERROR
+}
+
+enum AlertStatus {
+  PENDING
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+enum AlertSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
 model User {
-  id       String @id @default(uuid())
-  name     String
-  email    String @unique
-  password String
-  role     Role   @default(VIEWER)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id             String         @id @default(uuid())
+  name           String
+  email          String         @unique
+  password       String
+  role           Role           @default(VIEWER)
+  isActive       Boolean        @default(true)
+  avatar_url     String?
+  oauth_provider String?        // 'google' | null for local auth
+  oauth_id       String?        // Google sub ID
+  refreshTokens  RefreshToken[]
+  settings       UserSettings?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@index([oauth_provider, oauth_id])
+}
+
+model CameraGroup {
+  id        String    @id @default(uuid())
+  name      String
+  location  String?
+  cameras   Camera[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
 }
 
 model Camera {
-  id        String @id @default(uuid())
-  name      String
-  rtsp_url  String
-  status    String @default("OFFLINE")
-  location  String?
-  zones     Zone[]
-  detections Detection[]
-  faceEvents FaceEvent[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id           String        @id @default(uuid())
+  name         String
+  rtsp_url     String
+  detect_url   String?       // 🐦 Frigate: low-res stream for AI detection (640×360)
+  record_url   String?       // 🐦 Frigate: high-res stream for recording (1080p)
+  status       CameraStatus  @default(OFFLINE)
+  location     String?
+  snapshot_url String?
+  last_seen    DateTime?
+  sop_name     String?       // e.g. "hardhat_required" — maps to a fine-tuned model in the registry
+  group_id     String?
+  group        CameraGroup?  @relation(fields: [group_id], references: [id])
+  zones        Zone[]
+  detections   Detection[]
+  faceEvents   FaceEvent[]
+  alerts       Alert[]
+  privacyMasks PrivacyMask[]  // 🐦 Frigate: regions blacked-out before AI processing
+  recordings   Recording[]    // 🐦 Frigate: event-triggered clips with retention
+  alertRules   AlertRule[]
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
 }
 
 model Zone {
-  id             String @id @default(uuid())
+  id             String   @id @default(uuid())
   camera_id      String
-  camera         Camera @relation(fields: [camera_id], references: [id])
+  camera         Camera   @relation(fields: [camera_id], references: [id], onDelete: Cascade)
+  name           String?
   polygon_points Json
   rule_type      String
   createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 }
 
 model Detection {
-  id           String @id @default(uuid())
+  id           String   @id @default(uuid())
   camera_id    String
-  camera       Camera @relation(fields: [camera_id], references: [id])
+  camera       Camera   @relation(fields: [camera_id], references: [id], onDelete: Cascade)
   object_type  String
   confidence   Float
   timestamp    DateTime @default(now())
   snapshot_url String?
+
+  @@index([camera_id])
+  @@index([timestamp])
+  @@index([object_type])
 }
 
 model Person {
-  id             String @id @default(uuid())
+  id             String          @id @default(uuid())
   name           String
   tag            String?
+  photo_url      String?         // Reference photo for the person
+  alert_message  String?         // Custom alert message when detected, e.g. "VIP Sarah has arrived"
+  alert_enabled  Boolean         @default(false)  // Whether to trigger alerts for this person
   faceEmbeddings FaceEmbedding[]
   faceEvents     FaceEvent[]
-  createdAt      DateTime @default(now())
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
 }
 
 model FaceEmbedding {
-  id               String @id @default(uuid())
+  id               String  @id @default(uuid())
   person_id        String
-  person           Person @relation(fields: [person_id], references: [id])
+  person           Person  @relation(fields: [person_id], references: [id], onDelete: Cascade)
   embedding_vector Float[]
+  createdAt        DateTime @default(now())
 }
 
 model FaceEvent {
-  id         String @id @default(uuid())
-  camera_id  String
-  camera     Camera @relation(fields: [camera_id], references: [id])
-  person_id  String?
-  person     Person? @relation(fields: [person_id], references: [id])
+  id        String   @id @default(uuid())
+  camera_id String
+  camera    Camera   @relation(fields: [camera_id], references: [id], onDelete: Cascade)
+  person_id String?
+  person    Person?  @relation(fields: [person_id], references: [id])
   confidence Float
-  timestamp  DateTime @default(now())
+  timestamp DateTime @default(now())
+
+  @@index([camera_id])
+  @@index([timestamp])
+  @@index([person_id])
 }
 
 model Alert {
-  id          String @id @default(uuid())
-  event_id    String
-  alert_type  String
-  status      String @default("PENDING")
-  sent_at     DateTime @default(now())
+  id         String       @id @default(uuid())
+  event_id   String
+  alert_type String
+  status     AlertStatus  @default(PENDING)
+  severity   AlertSeverity @default(MEDIUM)
+  camera_id  String?
+  camera     Camera?      @relation(fields: [camera_id], references: [id])
+  zone_id    String?
+  assignee_id String?
+  sent_at    DateTime     @default(now())
+
+  @@index([status])
+  @@index([sent_at])
+  @@index([camera_id])
+}
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  user_id     String?
+  action      String
+  resource    String
+  resource_id String?
+  details     Json?
+  ip_address  String?
+  createdAt   DateTime @default(now())
+
+  @@index([user_id, createdAt])
+  @@index([action, createdAt])
+}
+
+model UserSettings {
+  id                    String   @id @default(uuid())
+  user_id               String   @unique
+  user                  User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  ai_enabled            Boolean  @default(true)
+  confidence_threshold  Float    @default(0.55)
+  notification_email    Boolean  @default(true)
+  notification_push     Boolean  @default(true)
+  notification_sms      Boolean  @default(false)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  email     String
+  token     String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([email])
+  @@index([token])
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  user_id   String
+  user      User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([user_id])
+  @@index([token])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 🐦 Frigate-inspired additions
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Rectangular regions blacked-out before AI inference (privacy protection).
+/// Prevents the AI Engine from detecting people/faces in e.g. a neighbour's window.
+model PrivacyMask {
+  id        String  @id @default(uuid())
+  camera_id String
+  camera    Camera  @relation(fields: [camera_id], references: [id], onDelete: Cascade)
+  label     String?            // Human-readable name, e.g. "Window", "Driveway"
+  /// Normalised coordinates (0.0–1.0) relative to the frame dimensions
+  x         Float              // left edge
+  y         Float              // top edge
+  width     Float
+  height    Float
+  createdAt DateTime @default(now())
+
+  @@index([camera_id])
+}
+
+/// Event-triggered video clip with Frigate-style retention metadata.
+/// The AI Engine emits 'start_recording'; the backend starts an FFmpeg clip
+/// and stores the filepath + metadata here. A scheduled purge job deletes
+/// clips older than the configured retention window.
+model Recording {
+  id           String    @id @default(uuid())
+  camera_id    String
+  camera       Camera    @relation(fields: [camera_id], references: [id], onDelete: Cascade)
+  filepath     String              // absolute path or MinIO object key
+  trigger      String              // 'person' | 'car' | 'intrusion' | 'face' …
+  duration_sec Int?                // actual clip length in seconds
+  size_bytes   Int?
+  started_at   DateTime
+  ended_at     DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([camera_id])
+  @@index([started_at])
+  @@index([trigger])
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 🏢 B2B / Consumer readiness additions
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Custom alert rules with schedule-based filtering and multi-channel actions.
+/// Replaces the hard-coded alert logic with user-configurable business rules.
+model AlertRule {
+  id            String   @id @default(uuid())
+  name          String
+  enabled       Boolean  @default(true)
+  camera_id     String?
+  camera        Camera?  @relation(fields: [camera_id], references: [id], onDelete: Cascade)
+  zone_id       String?
+  object_type   String?  // e.g. 'person', 'car', 'weapon'
+  alert_type    String   // e.g. 'intrusion', 'detection', 'face'
+  severity      AlertSeverity @default(MEDIUM)
+  schedule_mode String   @default("ALWAYS") // 'ALWAYS' | 'SCHEDULED'
+  schedules     AlertRuleSchedule[]
+  cooldown_sec  Int      @default(60)
+  actions       Json?    // { email: true, webhook: true, sms: false, push: true }
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+/// Time windows when an AlertRule is active (ignored when schedule_mode = 'ALWAYS').
+model AlertRuleSchedule {
+  id          String   @id @default(uuid())
+  rule_id     String
+  rule        AlertRule @relation(fields: [rule_id], references: [id], onDelete: Cascade)
+  day_of_week Int      // 0 = Sunday … 6 = Saturday
+  start_time  String   // "HH:mm" 24-hour
+  end_time    String   // "HH:mm" 24-hour
+  createdAt   DateTime @default(now())
+}
+
+/// In-app notification centre.  Persists until explicitly dismissed.
+model Notification {
+  id          String   @id @default(uuid())
+  user_id     String
+  title       String
+  message     String
+  type        String   // 'alert', 'system', 'camera'
+  read        Boolean  @default(false)
+  resource_id String?  // linked alert_id / camera_id
+  createdAt   DateTime @default(now())
+
+  @@index([user_id, read, createdAt])
+  @@index([type, createdAt])
+}
+
+/// Webhook destinations for third-party integrations (Slack, Teams, PagerDuty, etc).
+model WebhookConfig {
+  id        String   @id @default(uuid())
+  name      String
+  url       String
+  events    String[] // e.g. ['alert.created', 'camera.offline']
+  secret    String?  // HMAC signing key
+  headers   Json?    // extra HTTP headers
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Escalation policy for un-acknowledged alerts.
+/// Steps are processed sequentially; each step waits N minutes then escalates.
+model EscalationPolicy {
+  id         String   @id @default(uuid())
+  name       String
+  enabled    Boolean  @default(true)
+  alert_type String?  // null = applies to all alerts
+  min_severity AlertSeverity @default(MEDIUM)
+  steps      EscalationStep[]
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model EscalationStep {
+  id          String   @id @default(uuid())
+  policy_id   String
+  policy      EscalationPolicy @relation(fields: [policy_id], references: [id], onDelete: Cascade)
+  step_number Int
+  delay_min   Int      // minutes to wait before this step fires
+  channel     String   // 'email' | 'sms' | 'webhook' | 'push'
+  target      String   // email, phone number, or webhook config name
+  createdAt   DateTime @default(now())
 }

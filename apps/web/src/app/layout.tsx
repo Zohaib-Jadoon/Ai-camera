@@ -1,23 +1,10 @@
-import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+'use client';
+
+import { Inter } from "next/font/google";
 import "./globals.css";
-import Sidebar from "@/components/Sidebar";
-import AlertToast from "@/components/AlertToast";
+import { QueryProvider } from "@/providers/query-provider";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
-export const metadata: Metadata = {
-  title: "Madad Vision AI",
-  description: "AI-Powered Smart CCTV Surveillance",
-};
+const inter = Inter({ subsets: ["latin"] });
 
 export default function RootLayout({
   children,
@@ -25,16 +12,16 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html
-      lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
-    >
-      <body className="min-h-full flex bg-gray-100">
-        <Sidebar />
-        <main className="flex-1 p-8">
+    <html lang="en" className="h-full">
+      <head>
+        <title>Madad Vision AI — AI-Powered Surveillance Platform</title>
+        <meta name="description" content="Enterprise-grade AI CCTV surveillance platform with real-time detection, face recognition, and smart alerts." />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+      </head>
+      <body className={`${inter.className} h-full bg-[#020817]`}>
+        <QueryProvider>
           {children}
-        </main>
-        <AlertToast />
+        </QueryProvider>
       </body>
     </html>
   );

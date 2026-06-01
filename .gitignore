@@ -9,3 +9,11 @@ venv
 __pycache__
 *.pyc
 *.pt
+
+# Temporary/Cache folders
+.agents
+.context
+temp-project-repo
+graphify-out
+apps/graphify-out
+debug_test

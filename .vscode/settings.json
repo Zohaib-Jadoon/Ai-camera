@@ -1,0 +1,14 @@
+{
+  "python.defaultInterpreterPath": "C:\\Users\\CP\\AppData\\Local\\Programs\\Python\\Python314\\python.exe",
+  "python.languageServer": "Pylance",
+  "python.analysis.extraPaths": [
+    "C:\\Users\\CP\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages",
+    "C:\\Users\\CP\\Desktop\\Ai-camera\\apps\\ai-engine"
+  ],
+  "python.analysis.autoSearchPaths": true,
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportMissingModuleSource": "none"
+  },
+  "pyrefly.enable": false,
+  "pyrefly.disableLanguageServices": true
+}

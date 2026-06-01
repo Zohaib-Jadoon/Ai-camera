@@ -1,97 +1,890 @@
-from fastapi import FastAPI
+"""
+Multi-camera processing manager for Madad Vision AI Engine.
+Runs purely as an asyncio background service connected via Socket.IO.
+No REST API, no FastAPI, no auth required.
+"""
+# Load .env BEFORE any os.getenv() calls so all variables are available
+# when uvicorn starts the process (uvicorn does not auto-load .env files).
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    import pathlib as _pathlib
+    _load_dotenv(_pathlib.Path(__file__).parent.parent / ".env")
+except ImportError:
+    pass  # python-dotenv not installed — fall back to environment variables
+
 import asyncio
 import logging
 import socketio
-import uuid
 import os
-from datetime import datetime
-from src.detector import Detector
-from src.stream_handler import StreamHandler
-from src.advanced_ai import FaceProcessor, IntrusionDetector
+import time
+from datetime import datetime, timezone
+from .detector import Detector
+from .tracker import ObjectTracker
+from .intrusion import IntrusionDetector
+from .face_engine import FaceEngine
+from .stream_handler import StreamHandler
+from .data_collector import DataCollector
+from .model_registry import ModelRegistry
+from .camera_manager import CameraManager
+from .motion import MotionDetector  # Frigate-inspired motion gating
+from .stationary_classifier import (  # Frigate Phase-3: stationary persistence
+    StationaryMotionClassifier,
+    get_stationary_threshold,
+)
+# ── Advanced AI modules ─────────────────────────────────────────────────────
+from .traffic_analyzer import CongestionDetector, SpeedEstimator, WrongWayDetector
+from .safety_analyzer import FallDetector, FightDetector, PPEDetector
+from .lpr_engine import LPREngine
+from .reid_engine import ReIDEngine
+from .clip_engine import CLIPSearchEngine
+from .forecast_engine import ForecastEngine
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Madad Vision AI - Engine")
-detector = Detector()
-stream_handler = StreamHandler()
-face_processor = FaceProcessor()
-intrusion_detector = IntrusionDetector()
+BACKEND_WS_URL = os.getenv("BACKEND_WS_URL", "http://localhost:3001")
+CONFIDENCE_THRESHOLD = float(os.getenv("MODEL_CONFIDENCE_THRESHOLD", "0.55"))
+AI_ENGINE_KEY = os.getenv("AI_ENGINE_KEY", "default-secret-key")
 
-# Socket.IO client to connect to backend
-sio = socketio.AsyncClient()
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:3000")
+# Shared infrastructure
+model_registry = ModelRegistry()
+detector = Detector(confidence=CONFIDENCE_THRESHOLD)
+face_engine = FaceEngine()
 
-@app.get("/")
-async def root():
-    return {"message": "AI Engine is running", "socket_connected": sio.connected}
+# ── Advanced AI modules (shared across all cameras) ─────────────────────────
+lpr_engine = LPREngine()
+reid_engine = ReIDEngine()
+clip_search = CLIPSearchEngine()
+forecast_engine = ForecastEngine()
 
-async def processing_loop():
-    logger.info(f"Starting AI processing loop connecting to {BACKEND_URL}...")
-    stream_handler.start()
+# Socket.IO client — AI Engine connects TO the backend gateway.
+# engineio_options: raise pingTimeout to 60s so brief GIL holds from OpenCV
+# background threads don't cause the server to drop the connection.
+sio = socketio.AsyncClient(
+    reconnection=True,
+    reconnection_attempts=0,        # 0 = unlimited retries
+    reconnection_delay=2,           # start at 2s
+    reconnection_delay_max=15,      # cap at 15s
+    engineio_logger=False,
+)
+
+camera_manager = CameraManager()
+active_streams: dict[str, StreamHandler] = {}
+# Map camera_id -> IntrusionDetector so zone updates can be pushed to live tasks
+active_intrusion_detectors: dict[str, "IntrusionDetector"] = {}
+
+# Tracks whether the first sync since (re)connect has happened.
+# On the first sync we wipe ALL active tasks to clear any stale IDs
+# from a previous session — subsequent syncs do a normal diff.
+_first_sync_after_connect = True
+_heartbeat_task: asyncio.Task | None = None
+
+
+@sio.event
+async def connect():
+    global _first_sync_after_connect, _heartbeat_task
+    logger.info(f"Connected to backend WebSocket at {BACKEND_WS_URL}")
+    _first_sync_after_connect = True   # next sync_cameras is a clean slate
+    await sio.emit('request_cameras')
+    await sio.emit('request_embeddings')
+    if _heartbeat_task is None or _heartbeat_task.done():
+        _heartbeat_task = asyncio.create_task(health_heartbeat())
+
+
+@sio.event
+async def disconnect():
+    logger.warning("Disconnected from backend WebSocket — will reconnect automatically")
+
+
+@sio.on('sync_cameras')
+async def on_sync_cameras(cameras):
+    global _first_sync_after_connect
+    logger.info(f"Received {len(cameras)} cameras from backend")
+
+    new_ids = {c["id"] for c in cameras}
+
+    if _first_sync_after_connect:
+        # ── First sync after connect: stop EVERYTHING ─────────────────────
+        # This clears any stale camera IDs that were active in a previous
+        # AI Engine session so they don't keep sending camera_status events
+        # for IDs that no longer exist in the database.
+        logger.info("First sync — clearing all stale camera tasks")
+        for old_id in camera_manager.ids():
+            camera_manager.remove(old_id)
+            if old_id in active_streams:
+                active_streams[old_id].stop()
+                del active_streams[old_id]
+            if old_id in active_intrusion_detectors:
+                del active_intrusion_detectors[old_id]
+        _first_sync_after_connect = False
+    else:
+        # ── Subsequent syncs: diff-based add/remove ────────────────────────
+        for old_id in camera_manager.ids():
+            if old_id not in new_ids:
+                logger.info(f"Stopping task for removed camera {old_id}")
+                camera_manager.remove(old_id)
+                if old_id in active_streams:
+                    active_streams[old_id].stop()
+                    del active_streams[old_id]
+                active_intrusion_detectors.pop(old_id, None)
+
+    # Start tasks for cameras not yet running
+    for camera in cameras:
+        cid = camera["id"]
+        if not camera_manager.get(cid):
+            task = asyncio.create_task(process_camera(camera))
+            camera_manager.register(cid, camera.get("name", cid), camera.get("rtsp_url", ""), task)
+            logger.info(f"Spawned task for camera: {camera.get('name', cid)}")
+
+
+@sio.on('sync_embeddings')
+async def on_sync_embeddings(embeddings):
+    face_engine.load_embeddings(embeddings)
+
+
+@sio.on('request_model_swap')
+async def on_model_swap(data):
+    """Hot-swap the active YOLO model for a given SOP.
+
+    Payload: { "sop_name": "hardhat_required" }
+    The engine will load the registered .pt file without restarting.
+    """
+    sop_name = data.get("sop_name") if isinstance(data, dict) else None
+    model_path = model_registry.resolve(sop_name)
+    try:
+        detector.load_model(model_path)
+        logger.info(f"Model hot-swapped to '{sop_name}' ({model_path})")
+        if sio.connected:
+            await sio.emit("model_swap_ack", {"sop_name": sop_name, "model_path": model_path, "status": "ok"})
+    except Exception as e:
+        logger.error(f"Model swap failed: {e}")
+        if sio.connected:
+            await sio.emit("model_swap_ack", {"sop_name": sop_name, "status": "error", "error": str(e)})
+
+
+@sio.on('request_registry')
+async def on_request_registry(_data=None):
+    """Return the full model registry snapshot to the backend."""
+    if sio.connected:
+        await sio.emit("sync_registry", model_registry.snapshot())
+
+
+@sio.on('extract_face')
+async def on_extract_face(data: dict):
+    """
+    Extract face embedding from an uploaded image.
+    Payload: { "request_id": str, "image_b64": str }
+    Response: { "request_id": str, "embedding": list[float] | None, "error": str | None }
+    """
+    request_id = data.get("request_id", "")
+    image_b64 = data.get("image_b64", "")
+    
+    if not image_b64:
+        if sio.connected:
+            await sio.emit("extract_face_result", {
+                "request_id": request_id,
+                "embedding": None,
+                "error": "No image provided"
+            })
+        return
+
+    loop = asyncio.get_event_loop()
+
+    def _process_image(b64: str):
+        import base64 as _b64
+        import cv2 as _cv2
+        import numpy as _np
+        try:
+            # Strip data URI prefix if present
+            if "," in b64:
+                b64 = b64.split(",", 1)[1]
+            img_data = _b64.b64decode(b64)
+            nparr = _np.frombuffer(img_data, _np.uint8)
+            frame = _cv2.imdecode(nparr, _cv2.IMREAD_COLOR)
+            return face_engine.extract_embedding(frame)
+        except Exception as e:
+            logger.error(f"Failed to decode base64 image: {e}")
+            return None
+
+    try:
+        embedding = await loop.run_in_executor(None, _process_image, image_b64)
+        if sio.connected:
+            await sio.emit("extract_face_result", {
+                "request_id": request_id,
+                "embedding": embedding,
+                "error": None if embedding else "No face detected or extraction failed"
+            })
+    except Exception as e:
+        logger.error(f"Extract face error: {e}")
+        if sio.connected:
+            await sio.emit("extract_face_result", {
+                "request_id": request_id,
+                "embedding": None,
+                "error": str(e)
+            })
+
+
+@sio.on('test_stream')
+async def on_test_stream(data: dict):
+    """
+    Quick RTSP reachability test — called by backend when the user clicks
+    'Test Connection' in the camera calibration UI.
+
+    Payload:  { "request_id": str, "rtsp_url": str }
+    Response: { "request_id": str, "ok": bool, "message": str,
+                "resolution": [w, h] | null, "fps": float | null }
+    """
+    request_id = data.get("request_id", "")
+    rtsp_url = data.get("rtsp_url", "")
+
+    if not rtsp_url:
+        if sio.connected:
+            await sio.emit("stream_test_result", {
+                "request_id": request_id,
+                "ok": False,
+                "message": "No RTSP URL provided.",
+                "resolution": None,
+                "fps": None,
+            })
+        return
+
+    loop = asyncio.get_event_loop()
+
+    def _probe(url: str):
+        import cv2 as _cv2
+        cap = _cv2.VideoCapture(url)
+        if not cap.isOpened():
+            return False, "Cannot open stream — check URL, credentials, and network.", None, None
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            cap.release()
+            return False, "Connected but no frame received — camera may be offline.", None, None
+        h, w = frame.shape[:2]
+        fps = cap.get(_cv2.CAP_PROP_FPS)
+        cap.release()
+        return True, "Connection successful.", [w, h], round(fps, 1)
+
+    try:
+        ok, message, resolution, fps = await asyncio.wait_for(
+            loop.run_in_executor(None, _probe, rtsp_url),
+            timeout=8.0,
+        )
+    except asyncio.TimeoutError:
+        ok, message, resolution, fps = False, "Connection timed out (>8s). Verify the IP and RTSP path.", None, None
+    except Exception as exc:
+        ok, message, resolution, fps = False, str(exc), None, None
+
+    if sio.connected:
+        await sio.emit("stream_test_result", {
+            "request_id": request_id,
+            "ok": ok,
+            "message": message,
+            "resolution": resolution,
+            "fps": fps,
+        })
+    logger.info(f"Stream test for {rtsp_url}: ok={ok} message={message}")
+
+
+@sio.on('sync_zones')
+async def on_sync_zones(data: dict):
+    """Push updated zone list to a running camera task without restarting it.
+
+    Payload: { "camera_id": str, "zones": list }
+    """
+    camera_id = data.get("camera_id") if isinstance(data, dict) else None
+    zones = data.get("zones", []) if isinstance(data, dict) else []
+    if camera_id and camera_id in active_intrusion_detectors:
+        active_intrusion_detectors[camera_id].update_zones(zones)
+        logger.info(f"Camera {camera_id}: zones live-updated ({len(zones)} zone(s))")
+    else:
+        logger.warning(f"sync_zones: camera {camera_id} not found in active tasks")
+
+
+@sio.on('clip_search')
+async def on_clip_search(data: dict):
+    """Natural language video search.
+
+    Payload: { "request_id": str, "query": str }
+    Response: { "request_id": str, "results": [...] }
+    """
+    request_id = data.get("request_id", "")
+    query = data.get("query", "")
+    if not query:
+        if sio.connected:
+            await sio.emit("clip_search_result", {
+                "request_id": request_id, "results": [], "error": "No query provided"
+            })
+        return
+
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(None, clip_search.search, query)
+    if sio.connected:
+        await sio.emit("clip_search_result", {
+            "request_id": request_id,
+            "results": results,
+            "stats": clip_search.get_index_stats(),
+        })
+    logger.info(f"CLIP search '{query}': {len(results)} results")
+
+
+@sio.on('request_forecast')
+async def on_request_forecast(data: dict):
+    """Generate predictive forecasts.
+
+    Payload: { "request_id": str, "camera_id"?: str }
+    Response: { "request_id": str, "forecast": [...], "anomalies": [...], "stats": {...} }
+    """
+    request_id = data.get("request_id", "")
+    camera_id = data.get("camera_id")
+
+    loop = asyncio.get_event_loop()
+    forecast = await loop.run_in_executor(None, forecast_engine.forecast, camera_id)
+    anomalies = await loop.run_in_executor(None, forecast_engine.get_anomalies, camera_id)
+    stats = forecast_engine.get_stats()
+
+    if sio.connected:
+        await sio.emit("forecast_result", {
+            "request_id": request_id,
+            "forecast": forecast,
+            "anomalies": anomalies,
+            "stats": stats,
+        })
+    logger.info(f"Forecast generated: {len(forecast)} predictions, {len(anomalies)} anomalies")
+
+async def health_heartbeat():
+    """Emit periodic camera_status heartbeat for all active streams."""
+    while True:
+        for cam_id in list(active_streams.keys()):
+            if sio.connected and not cam_id.endswith(":record"):
+                await sio.emit('camera_status', {'camera_id': cam_id, 'status': 'ONLINE'})
+        await asyncio.sleep(30)
+
+
+async def ensure_connected():
+    """Initial connection to the backend Socket.IO gateway.
+
+    Built-in reconnection handles drops automatically after the first connect.
+    This coroutine just establishes the initial connection with a retry loop.
+    """
+    while True:
+        if sio.connected:
+            # Already connected — built-in reconnection handles any drops.
+            await asyncio.sleep(10)
+            continue
+        try:
+            await asyncio.wait_for(
+                sio.connect(
+                    BACKEND_WS_URL,
+                    socketio_path="/socket.io",
+                    transports=["websocket"],
+                    headers={"x-ai-engine-key": AI_ENGINE_KEY},
+                ),
+                timeout=10,
+            )
+            # Successfully connected — sleep; reconnection library takes over on drop
+            await asyncio.sleep(10)
+        except asyncio.TimeoutError:
+            logger.error("WebSocket connect timed out — retrying in 5s")
+            await asyncio.sleep(5)
+        except Exception as e:
+            logger.error(f"WebSocket connect failed: {e} ─ retrying in 5s")
+            await asyncio.sleep(5)
+
+
+async def process_camera(camera: dict):
+    """
+    Dedicated processing loop for a single camera.
+    Runs detection, tracking, intrusion, and face recognition.
+    """
+    camera_id = camera["id"]
+    rtsp_url = camera.get("rtsp_url", "")
+    # 🐦 Frigate dual-stream: use low-res stream for AI, high-res for recording
+    detect_url = camera.get("detect_url") or rtsp_url
+    record_url = camera.get("record_url") or rtsp_url
+    sop_name = camera.get("sop_name")  # optional SOP assigned to this camera
+    # 🐦 Privacy masks: normalised rectangles blacked-out before inference
+    privacy_masks = camera.get("privacy_masks", [])  # list of {x, y, width, height}
+    tracker = ObjectTracker()
+    intrusion_detector = IntrusionDetector()
+    collector = DataCollector(sop_name=sop_name or "default")
+    # 🐦 Frigate Phase-3: prevents stationary objects (parked car, package)
+    # from being re-detected as new events on every frame.
+    stationary_classifier = StationaryMotionClassifier()
+    # ── Per-camera advanced AI analyzers ──────────────────────────────────
+    congestion_detector = CongestionDetector()
+    speed_estimator = SpeedEstimator()
+    wrongway_detector = WrongWayDetector()
+    fall_detector = FallDetector()
+    fight_detector = FightDetector()
+    ppe_detector = PPEDetector()
+    # Number of frames with zero centroid movement before a track is
+    # considered "stationary" and handed off to the motion classifier.
+    STATIONARY_FRAMES = int(os.getenv("STATIONARY_FRAMES", "50"))
+
+    # Sync zones from the camera payload received from backend
+    zones = camera.get("zones", [])
+    if zones:
+        intrusion_detector.update_zones(zones)
+        logger.info(f"Camera {camera_id}: loaded {len(zones)} intrusion zone(s)")
+
+    # Register so live zone updates can be pushed without restarting this task
+    active_intrusion_detectors[camera_id] = intrusion_detector
+
+    logger.info(f"Starting processing for camera {camera_id} ({rtsp_url}) SOP={sop_name or 'default'}")
+
+    # 🐦 Frigate dual-stream: detect on low-res, keep record stream separate
+    stream = StreamHandler(source=detect_url if detect_url else 0)
+    if record_url and record_url != detect_url:
+        record_stream = StreamHandler(source=record_url)
+        active_streams[f"{camera_id}:record"] = record_stream
+    else:
+        record_stream = None
+    active_streams[camera_id] = stream
+    motion = MotionDetector()   # Frigate-style: skip YOLO when nothing moves
+    _motion_initialized = False  # lazy-init once first frame size is known
+
+    try:
+        stream.start()
+    except Exception as e:
+        logger.error(f"Camera {camera_id}: stream start failed: {e}. Using synthetic frames.")
+
+    consecutive_errors = 0
+    max_errors = 10
+    last_status: str | None = None  # track last emitted status to avoid spamming
+    status_report_interval = 10    # emit status every N seconds
+    last_status_report = 0.0
+
+    loop = asyncio.get_event_loop()
 
     while True:
         try:
-            if not sio.connected:
-                try:
-                    await sio.connect(BACKEND_URL)
-                    logger.info("Connected to backend via Socket.IO")
-                except Exception as e:
-                    logger.error(f"Failed to connect to backend: {e}")
-                    await asyncio.sleep(5)
-                    continue
+            # ── Camera status heartbeat ─────────────────────────────────────
+            # Emit camera_status ONLINE/OFFLINE so the backend can keep the DB
+            # in sync.  We emit on every transition AND on a periodic heartbeat.
+            now = time.monotonic()
+            current_status = "ONLINE" if stream.is_online else "OFFLINE"
+            if current_status != last_status or (now - last_status_report) >= status_report_interval:
+                if sio.connected:
+                    await sio.emit("camera_status", {
+                        "camera_id": camera_id,
+                        "status": current_status,
+                    })
+                last_status = current_status
+                last_status_report = now
 
-            frame = stream_handler.get_frame()
+            # ── Skip inference when stream is offline ───────────────────────
+            # Without this guard, the loop runs at full speed on black
+            # placeholder frames — burning CPU and starving Socket.IO heartbeats.
+            if not stream.is_online:
+                motion.calibrating = True  # reset background model baseline on reconnect
+                await asyncio.sleep(1)
+                continue
 
-            # 1. Object Detection
-            detections = detector.detect(frame)
+            frame = stream.get_frame()
 
-            # 2. Intrusion Detection
-            intrusions = intrusion_detector.check_intrusion(detections)
+            # ── 🐦 Privacy masks (Frigate): black-out sensitive regions ────────
+            # Applied before YOLO and FaceEngine so masked areas are never inferred.
+            if privacy_masks:
+                import cv2 as _cv2_mask
+                fh, fw = frame.shape[:2]
+                frame = frame.copy()
+                for m in privacy_masks:
+                    try:
+                        mx = int(m['x'] * fw)
+                        my = int(m['y'] * fh)
+                        mw = int(m['width'] * fw)
+                        mh = int(m['height'] * fh)
+                        frame[my:my+mh, mx:mx+mw] = 0
+                    except (KeyError, TypeError, ValueError):
+                        pass  # malformed mask — skip safely
+
+            # ── Motion gating (Frigate-inspired) ────────────────────────────
+            # Only run expensive YOLO inference when pixels actually changed.
+            # Reduces CPU 60-80% on static/idle scenes.
+            import cv2 as _cv2_motion
+            gray_for_motion = _cv2_motion.cvtColor(frame, _cv2_motion.COLOR_BGR2GRAY)
+
+            # Lazy-reinit MotionDetector with real frame shape on first frame
+            if not _motion_initialized:
+                fh_m, fw_m = gray_for_motion.shape[:2]
+                motion.__init__(frame_shape=(fh_m, fw_m))
+                _motion_initialized = True
+
+            motion_boxes = motion.detect(gray_for_motion)
+            if not motion_boxes:
+                await asyncio.sleep(0.05)  # yield, check again in 50ms
+                continue
+
+            # --- Offload CPU-bound inference to thread pool ---
+            # This keeps the asyncio event loop free to handle socket events,
+            # heartbeats, and other camera tasks concurrently.
+            raw_detections = await loop.run_in_executor(
+                None, detector.detect, frame
+            )
+            tracked = tracker.update(raw_detections)
+
+            # ── Frigate Phase-3: stationary motion classification ────────────
+            # For each track that has been motionless for STATIONARY_FRAMES
+            # frames, use appearance-based NCC + phase-correlation to decide
+            # whether the object truly moved or if the detection is just jitter.
+            # Tracks confirmed stationary are omitted from the detection emit
+            # so the backend doesn't receive a flood of redundant events.
+            active_track_ids: set[str] = set()
+            visible_tracked: list[dict] = []
+            for det in tracked:
+                tid = det.get("track_id", "")
+                active_track_ids.add(tid)
+                motionless = det.get("motionless_count", 0)  # provided by CentroidTracker
+                thresh = get_stationary_threshold(det["object_type"])
+
+                if thresh.motion_classifier_enabled and motionless >= STATIONARY_FRAMES:
+                    # First time crossing the threshold: set anchor
+                    _sb = det["smooth_box"] if "smooth_box" in det else det["box"]
+                    median_box: tuple[int, int, int, int] = (int(_sb[0]), int(_sb[1]), int(_sb[2]), int(_sb[3]))
+                    stationary_classifier.ensure_anchor(tid, frame, median_box)
+                    # Subsequent frames: evaluate whether object has truly moved
+                    _rb = det["box"]
+                    raw_box: tuple[int, int, int, int] = (int(_rb[0]), int(_rb[1]), int(_rb[2]), int(_rb[3]))
+                    keep_stationary = stationary_classifier.evaluate(tid, frame, raw_box)
+                    if keep_stationary:
+                        continue  # suppress this re-detection — object hasn't moved
+                    else:
+                        # Genuine movement — reset classifier so anchor refreshes
+                        stationary_classifier.on_active(tid)
+
+                visible_tracked.append(det)
+
+            # Clean up state for tracks the CentroidTracker has pruned
+            stationary_classifier.cleanup(active_track_ids)
+
+            # Collect training data if enabled (also offloaded — cv2.imwrite is slow)
+            await loop.run_in_executor(None, collector.record, frame, raw_detections)
+
+            for det in visible_tracked:
+                payload = {
+                    "camera_id": camera_id,
+                    "object_type": det["object_type"],
+                    "confidence": float(det["confidence"]),
+                    "track_id": det.get("track_id"),
+                    "box": det.get("smooth_box", det.get("box")),  # Frigate: smooth box for UI
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                if sio.connected:
+                    await sio.emit("detection", payload)
+
+            # 🐦 Frigate recording: emit start_recording when detections fire
+            if visible_tracked and sio.connected:
+                await sio.emit("start_recording", {
+                    "camera_id": camera_id,
+                    "duration_sec": 30,
+                    "trigger": visible_tracked[0]["object_type"],
+                    "record_url": record_url,
+                })
+
+            # Intrusion detection — pass frame dims so normalised canvas
+            # coordinates are correctly scaled to pixel space (Frigate approach).
+            # Use smooth_box (percentile-stabilised) as the 'box' key so zone
+            # checks don't fire on detection jitter near zone boundaries.
+            fh, fw = frame.shape[:2]
+            tracked_for_intrusion = [
+                {**d, "box": d.get("smooth_box", d.get("box"))} for d in visible_tracked
+            ]
+            intrusions = intrusion_detector.check(tracked_for_intrusion, frame_width=fw, frame_height=fh)
             for intr in intrusions:
-                payload = {
-                    'id': str(uuid.uuid4()),
-                    'camera_id': 'camera-1',
-                    'object_type': f"INTRUSION_{intr['object_type']}",
-                    'confidence': intr['confidence'],
-                    'timestamp': datetime.utcnow().isoformat() + 'Z'
-                }
-                await sio.emit('detection', payload)
+                if sio.connected:
+                    await sio.emit("intrusion", {
+                        "camera_id":  camera_id,
+                        "zone_id":    intr.get("zone_id"),
+                        "zone_name":  intr.get("zone_name"),
+                        "rule_type":  intr.get("rule_type"),
+                        "object_type": intr["object_type"],
+                        "confidence": float(intr.get("confidence", 0)),
+                        "timestamp":  datetime.now(timezone.utc).isoformat(),
+                    })
 
-            # 3. Face Recognition
-            faces = face_processor.detect_and_recognize(frame)
-            for face in faces:
-                payload = {
-                    'id': str(uuid.uuid4()),
-                    'camera_id': 'camera-1',
-                    'object_type': 'face',
-                    'is_known': face['is_known'],
-                    'person_name': face.get('person_name', 'Unknown'),
-                    'confidence': face['confidence'],
-                    'timestamp': datetime.utcnow().isoformat() + 'Z'
-                }
-                await sio.emit('detection', payload)
+            # Face recognition (every 5th frame — offloaded, CPU-bound)
+            if stream.frame_count % 5 == 0:
+                faces = await loop.run_in_executor(
+                    None, face_engine.process, frame
+                )
+                for face in faces:
+                    if sio.connected:
+                        await sio.emit("face_event", {
+                            "camera_id": camera_id,
+                            "person_id": face.get("person_id"),
+                            "person_name": face.get("person_name"),
+                            "is_known": face["is_known"],
+                            "confidence": float(face["confidence"]),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        })
 
-            # Regular detections
-            for det in detections:
-                payload = {
-                    'id': str(uuid.uuid4()),
-                    'camera_id': 'camera-1',
-                    'object_type': det['object_type'],
-                    'confidence': det['confidence'],
-                    'timestamp': datetime.utcnow().isoformat() + 'Z'
-                }
-                await sio.emit('detection', payload)
+            # ── Advanced AI Analytics ────────────────────────────────────────
 
-            await asyncio.sleep(2)
+            # 1. Traffic Congestion Detection
+            if zones and visible_tracked:
+                congestion_events = congestion_detector.analyze(
+                    visible_tracked, zones, fw, fh
+                )
+                for evt in congestion_events:
+                    if sio.connected:
+                        await sio.emit("congestion", {
+                            "camera_id": camera_id,
+                            "zone_id": evt["zone_id"],
+                            "zone_name": evt["zone_name"],
+                            "vehicle_count": evt["vehicle_count"],
+                            "level": evt["level"],
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        })
+
+            # 2. Speed Estimation
+            if visible_tracked:
+                speed_events = speed_estimator.update(visible_tracked)
+                for evt in speed_events:
+                    if sio.connected:
+                        await sio.emit("speed_violation", {
+                            "camera_id": camera_id,
+                            "track_id": evt["track_id"],
+                            "object_type": evt["object_type"],
+                            "speed_kmh": evt["speed_kmh"],
+                            "speed_mph": evt["speed_mph"],
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        })
+
+            # 3. Wrong-way Detection
+            if visible_tracked:
+                wrongway_events = wrongway_detector.check(visible_tracked, fw, fh)
+                for evt in wrongway_events:
+                    if sio.connected:
+                        await sio.emit("wrong_way", {
+                            "camera_id": camera_id,
+                            "track_id": evt["track_id"],
+                            "object_type": evt["object_type"],
+                            "line_id": evt["line_id"],
+                            "line_name": evt["line_name"],
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        })
+
+            # 4. Fall Detection (requires pose keypoints)
+            if visible_tracked:
+                fall_events = fall_detector.analyze(visible_tracked)
+                for evt in fall_events:
+                    if sio.connected:
+                        await sio.emit("safety_event", {
+                            "camera_id": camera_id,
+                            "track_id": evt["track_id"],
+                            "event_type": "FALL_DETECTED",
+                            "confidence": float(evt.get("confidence", 0)),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        })
+
+            # 5. Fight Detection (requires pose keypoints)
+            if visible_tracked:
+                fight_events = fight_detector.analyze(visible_tracked)
+                for evt in fight_events:
+                    if sio.connected:
+                        await sio.emit("safety_event", {
+                            "camera_id": camera_id,
+                            "track_ids": evt["track_ids"],
+                            "event_type": "FIGHT_DETECTED",
+                            "confidence": float(evt.get("confidence", 0)),
+                            "proximity_px": evt.get("proximity_px"),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        })
+
+            # 6. PPE Compliance (requires pose keypoints + frame)
+            if visible_tracked:
+                ppe_events = await loop.run_in_executor(
+                    None, ppe_detector.analyze, visible_tracked, frame
+                )
+                for evt in ppe_events:
+                    if sio.connected:
+                        await sio.emit("safety_event", {
+                            "camera_id": camera_id,
+                            "track_id": evt["track_id"],
+                            "event_type": "PPE_VIOLATION",
+                            "violations": evt.get("violations", []),
+                            "confidence": float(evt.get("confidence", 0)),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        })
+
+            # 7. License Plate Recognition (offloaded — OCR is slow)
+            if visible_tracked:
+                lpr_events = await loop.run_in_executor(
+                    None, lpr_engine.process, visible_tracked, frame
+                )
+                for evt in lpr_events:
+                    if sio.connected:
+                        await sio.emit("plate_detected", {
+                            "camera_id": camera_id,
+                            "track_id": evt["track_id"],
+                            "object_type": evt["object_type"],
+                            "plate_text": evt["plate_text"],
+                            "plate_confidence": evt["plate_confidence"],
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        })
+
+            # 8. Cross-Camera ReID (offloaded)
+            if visible_tracked:
+                reid_events = await loop.run_in_executor(
+                    None, reid_engine.process, visible_tracked, frame, camera_id
+                )
+                for evt in reid_events:
+                    if sio.connected:
+                        await sio.emit("reid_match", {
+                            "camera_id": camera_id,
+                            "track_id": evt["track_id"],
+                            "global_id": evt["global_id"],
+                            "matched_camera": evt["matched_camera"],
+                            "similarity": evt["similarity"],
+                            "sighting_count": evt.get("sighting_count", 0),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        })
+
+            # 9. CLIP Frame Indexing (for natural language search)
+            if stream.frame_count % 15 == 0:  # Index every ~0.5s at 30fps
+                await loop.run_in_executor(
+                    None, clip_search.index_frame, frame, camera_id, raw_detections
+                )
+
+            # 10. Predictive Forecasting — record events for pattern analysis
+            if visible_tracked:
+                for det in visible_tracked:
+                    forecast_engine.record_event(
+                        camera_id=camera_id,
+                        object_type=det.get("object_type", "unknown"),
+                    )
+
+            # Cleanup stale state in analyzers
+            active_track_str = active_track_ids
+            speed_estimator.cleanup(active_track_str)
+            wrongway_detector.cleanup(active_track_str)
+            fall_detector.cleanup(active_track_str)
+            lpr_engine.cleanup(active_track_str)
+            reid_engine.cleanup(active_track_str, camera_id)
+
+            # ── Live frame streaming ─────────────────────────────────────────
+            # Emit an annotated JPEG frame every 3rd frame so the web dashboard
+            # can display a live video feed.  We draw bounding boxes first so
+            # the viewer sees the AI detections overlaid on the video.
+            # Throttled to every 3rd frame to cap bandwidth (~10 fps at 30 fps input).
+            if stream.frame_count % 3 == 0 and sio.connected:
+                def _encode_frame(f, dets):
+                    import base64 as _b64
+                    import cv2 as _cv2
+                    annotated = f.copy()
+                    for d in dets:
+                        # Use smooth_box for tracked objects, fallback to box, then bbox
+                        bbox = d.get("smooth_box", d.get("box", d.get("bbox")))
+                        if bbox and len(bbox) == 4:
+                            x1, y1, x2, y2 = [int(v) for v in bbox]
+                            label = f"{d.get('object_type', '?')} {d.get('confidence', 0):.0%}"
+                            _cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 80), 2)
+                            _cv2.putText(annotated, label, (x1, max(y1 - 8, 12)),
+                                        _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 80), 1)
+                    # PERF-5: resize to max 854px wide before encoding to halve payload
+                    h, w = annotated.shape[:2]
+                    if w > 854:
+                        scale = 854 / w
+                        annotated = _cv2.resize(annotated, (854, int(h * scale)))
+                    # Quality 50 keeps good visual quality at ~30KB vs ~80KB at 80
+                    ok, buf = _cv2.imencode('.jpg', annotated, [_cv2.IMWRITE_JPEG_QUALITY, 50])
+                    if not ok:
+                        return None
+                    return _b64.b64encode(buf).decode('utf-8')
+
+                jpeg_b64 = await loop.run_in_executor(None, _encode_frame, frame, tracked)
+                if jpeg_b64:
+                    await sio.emit("frame", {
+                        "camera_id": camera_id,
+                        "data": jpeg_b64,
+                    })
+
+            consecutive_errors = 0
+            await asyncio.sleep(0)  # yield to event loop between frames
+
+        except asyncio.CancelledError:
+            logger.info(f"Camera {camera_id}: processing cancelled")
+            break
         except Exception as e:
-            logger.error(f"Error in processing loop: {e}")
-            await asyncio.sleep(1)
+            consecutive_errors += 1
+            logger.error(f"Camera {camera_id}: processing error #{consecutive_errors}: {e}")
+            if consecutive_errors >= max_errors:
+                logger.critical(f"Camera {camera_id}: too many errors, pausing 30s")
+                await asyncio.sleep(30)
+                consecutive_errors = 0
+            else:
+                await asyncio.sleep(1)
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(processing_loop())
+    stream.stop()
+
+
+async def main():
+    logger.info("Starting Madad Vision AI Engine...")
+    connect_task = asyncio.create_task(ensure_connected())
+
+    try:
+        # Run forever — yield control so tasks and socket events can execute
+        while True:
+            await asyncio.sleep(3600)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # asyncio.run() converts Ctrl+C → CancelledError injected into this coroutine.
+        # KeyboardInterrupt is caught here only as a safety net.
+        logger.info("Shutting down AI Engine...")
+    finally:
+        connect_task.cancel()
+        await camera_manager.shutdown_all()
+        for stream in active_streams.values():
+            stream.stop()
+        active_intrusion_detectors.clear()
+        if sio.connected:
+            await sio.disconnect()
+        logger.info("AI engine stopped")
+
+
+_main_task: asyncio.Task | None = None
+
+async def app(scope, receive, send):
+    """
+    Minimal ASGI application shim for Uvicorn compatibility.
+    Runs the AI Engine's main loop as a background task.
+    """
+    global _main_task
+    if scope["type"] == "lifespan":
+        while True:
+            message = await receive()
+            if message["type"] == "lifespan.startup":
+                # Start the engine
+                _main_task = asyncio.create_task(main())
+                await send({"type": "lifespan.startup.complete"})
+            elif message["type"] == "lifespan.shutdown":
+                # Stop the engine — use proper None check so Pyright narrows the type
+                if _main_task is not None:
+                    _main_task.cancel()
+                    try:
+                        await _main_task
+                    except asyncio.CancelledError:
+                        pass
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+    elif scope["type"] == "http":
+        # Reject HTTP requests
+        await send({
+            "type": "http.response.start",
+            "status": 404,
+            "headers": [(b"content-type", b"text/plain")],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": b"AI Engine is a WebSocket-only service.",
+        })
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # asyncio.run() itself forwards KeyboardInterrupt after cancelling the main task.
+        # The finally block inside main() handles all cleanup — nothing extra needed here.
+        pass
