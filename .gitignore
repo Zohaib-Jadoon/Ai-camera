@@ -18,3 +18,8 @@ graphify-out
 apps/graphify-out
 debug_test
 Madad_Vision_AI_Client_Briefing.pdf
+
+# Editor & Tool Cache metadata
+.vscode/
+.graphify_python
+skills-lock.json
