@@ -27,8 +27,8 @@ const RTSP_INPUT_ARGS: string[] = [
 const HLS_OUTPUT_ARGS: string[] = [
   '-c:v', 'copy',
   '-c:a', 'aac',
-  '-hls_time', '2',
-  '-hls_list_size', '5',
+  '-hls_time', '1',               // 1-second segments (faster startup)
+  '-hls_list_size', '3',          // Rolling window of 3 segments (lower player delay)
   '-hls_flags', 'delete_segments+omit_endlist',
   '-f', 'hls',
 ];

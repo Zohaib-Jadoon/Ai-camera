@@ -41,7 +41,7 @@ const itemVariants: Variants = {
  *   3. Each frame is rendered instantly as a data-URL on an <img> element.
  *   4. On unmount, leaves the room to stop receiving frames.
  */
-function CameraFeed({ cameraId, isOnline }: { cameraId: string; isOnline: boolean }) {
+function CameraFeed({ cameraId, isOnline, refreshTrigger, isZoomed }: { cameraId: string; isOnline: boolean; refreshTrigger: number; isZoomed: boolean }) {
   const [frameSrc, setFrameSrc] = useState<string | null>(null);
   const [hasFrame, setHasFrame] = useState(false);
 
@@ -53,6 +53,9 @@ function CameraFeed({ cameraId, isOnline }: { cameraId: string; isOnline: boolea
     }
 
     const socket = getSocket();
+
+    // Reset frame state on manual refresh
+    setHasFrame(false);
 
     // Join the camera room so the backend delivers frames only to us
     socket.emit('join-camera', cameraId);
@@ -69,7 +72,7 @@ function CameraFeed({ cameraId, isOnline }: { cameraId: string; isOnline: boolea
       socket.off('frame', onFrame);
       socket.emit('leave-camera', cameraId);
     };
-  }, [cameraId, isOnline]);
+  }, [cameraId, isOnline, refreshTrigger]);
 
   if (!isOnline) {
     return (
@@ -99,10 +102,13 @@ function CameraFeed({ cameraId, isOnline }: { cameraId: string; isOnline: boolea
         alt="Live camera feed"
         width={1280}
         height={720}
-        className="absolute inset-0 w-full h-full object-cover"
+        className={cn(
+          "absolute inset-0 w-full h-full object-cover transition-transform duration-300",
+          isZoomed ? "scale-150 z-20 pointer-events-none" : "scale-100"
+        )}
       />
       {/* Scan line overlay */}
-      <div className="scan-line absolute inset-0 pointer-events-none" />
+      <div className="scan-line absolute inset-0 pointer-events-none z-30" />
     </>
   );
 }
@@ -112,6 +118,8 @@ export default function LiveMonitoring() {
   const [layout, setLayout] = useState<'2x2' | '3x2' | '1+3'>('2x2');
   const [selectedCam, setSelectedCam] = useState<string | null>(null);
   const [muted, setMuted] = useState(true);
+  const [refreshTriggers, setRefreshTriggers] = useState<Record<string, number>>({});
+  const [zoomedCams, setZoomedCams] = useState<Record<string, boolean>>({});
   const qc = useQueryClient();
 
   // Real-time camera status updates via WebSocket
@@ -139,6 +147,37 @@ export default function LiveMonitoring() {
     acc[ev.camera_id] = (acc[ev.camera_id] ?? 0) + 1;
     return acc;
   }, {});
+
+  // Interactive Hover Button Handlers
+  const handleFullscreen = (e: React.MouseEvent, camId: string) => {
+    e.stopPropagation();
+    const el = document.getElementById(`cam-card-${camId}`);
+    if (el) {
+      if (document.fullscreenElement) {
+        document.exitFullscreen();
+      } else {
+        el.requestFullscreen().catch((err) => {
+          console.error(`Error entering fullscreen: ${err}`);
+        });
+      }
+    }
+  };
+
+  const handleZoomToggle = (e: React.MouseEvent, camId: string) => {
+    e.stopPropagation();
+    setZoomedCams(prev => ({ ...prev, [camId]: !prev[camId] }));
+  };
+
+  const handleRefresh = (e: React.MouseEvent, camId: string) => {
+    e.stopPropagation();
+    qc.invalidateQueries({ queryKey: ['cameras'] });
+    setRefreshTriggers(prev => ({ ...prev, [camId]: (prev[camId] ?? 0) + 1 }));
+  };
+
+  const handleSettings = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    window.location.href = '/cameras';
+  };
 
   return (
     <motion.div variants={containerVariants} initial="hidden" animate="visible" className="h-full flex flex-col gap-4">
@@ -197,6 +236,7 @@ export default function LiveMonitoring() {
                     layout
                     variants={itemVariants}
                     key={cam.id}
+                    id={`cam-card-${cam.id}`}
                     onClick={() => setSelectedCam(cam.id)}
                     className={cn(
                       'relative rounded-2xl overflow-hidden cursor-pointer group transition-all duration-300',
@@ -208,11 +248,16 @@ export default function LiveMonitoring() {
                   >
                     {/* Video / snapshot area */}
                     <div className="w-full h-full min-h-[200px] flex items-center justify-center relative bg-[#020617]">
-                      <CameraFeed cameraId={cam.id} isOnline={isOnline} />
+                      <CameraFeed
+                        cameraId={cam.id}
+                        isOnline={isOnline}
+                        refreshTrigger={refreshTriggers[cam.id] ?? 0}
+                        isZoomed={!!zoomedCams[cam.id]}
+                      />
                     </div>
 
                     {/* Top overlay */}
-                    <div className="absolute top-3 left-3 flex items-center gap-2 z-10">
+                    <div className="absolute top-3 left-3 flex items-center gap-2 z-40">
                       {isOnline && (
                         <span className="flex items-center gap-1.5 bg-red-600/90 backdrop-blur-sm border border-red-500/50 text-white text-[10px] font-extrabold px-2.5 py-1 rounded-md shadow-lg shadow-red-600/20 live-indicator">
                           <span className="w-1.5 h-1.5 bg-white rounded-full" /> LIVE
@@ -224,12 +269,40 @@ export default function LiveMonitoring() {
                     </div>
 
                     {/* Hover controls */}
-                    <div className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex gap-2 z-10">
-                      {[Maximize2, ZoomIn, RotateCcw, Settings].map((Icon, i) => (
-                        <button key={i} className="w-8 h-8 bg-slate-900/80 backdrop-blur-md border border-slate-700/50 rounded-lg flex items-center justify-center text-slate-300 hover:text-white hover:bg-blue-600/90 hover:border-blue-500 transition-all shadow-lg hover:-translate-y-0.5">
-                          <Icon className="w-4 h-4" />
-                        </button>
-                      ))}
+                    <div className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex gap-2 z-40">
+                      <button
+                        onClick={(e) => handleFullscreen(e, cam.id)}
+                        className="w-8 h-8 bg-slate-900/80 backdrop-blur-md border border-slate-700/50 rounded-lg flex items-center justify-center text-slate-300 hover:text-white hover:bg-blue-600/90 hover:border-blue-500 transition-all shadow-lg hover:-translate-y-0.5"
+                        title="Fullscreen"
+                      >
+                        <Maximize2 className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={(e) => handleZoomToggle(e, cam.id)}
+                        className={cn(
+                          "w-8 h-8 backdrop-blur-md border rounded-lg flex items-center justify-center transition-all shadow-lg hover:-translate-y-0.5",
+                          zoomedCams[cam.id]
+                            ? "bg-blue-600 border-blue-500 text-white"
+                            : "bg-slate-900/80 border-slate-700/50 text-slate-300 hover:text-white hover:bg-blue-600/90 hover:border-blue-500"
+                        )}
+                        title="Zoom Feed"
+                      >
+                        <ZoomIn className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={(e) => handleRefresh(e, cam.id)}
+                        className="w-8 h-8 bg-slate-900/80 backdrop-blur-md border border-slate-700/50 rounded-lg flex items-center justify-center text-slate-300 hover:text-white hover:bg-blue-600/90 hover:border-blue-500 transition-all shadow-lg hover:-translate-y-0.5"
+                        title="Refresh Connection"
+                      >
+                        <RotateCcw className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={handleSettings}
+                        className="w-8 h-8 bg-slate-900/80 backdrop-blur-md border border-slate-700/50 rounded-lg flex items-center justify-center text-slate-300 hover:text-white hover:bg-blue-600/90 hover:border-blue-500 transition-all shadow-lg hover:-translate-y-0.5"
+                        title="Camera Settings"
+                      >
+                        <Settings className="w-4 h-4" />
+                      </button>
                     </div>
 
                     {/* Bottom stats */}
