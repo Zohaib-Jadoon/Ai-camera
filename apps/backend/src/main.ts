@@ -9,14 +9,23 @@ import * as express from 'express';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
+
+  // bodyParser: false — we register our own parser with a 20 MB limit.
+  // NestJS/Express default is 100 KB which breaks face photo base64 uploads.
   const app = await NestFactory.create(AppModule, {
     logger: ['error', 'warn', 'log', 'debug'],
+    bodyParser: false,
   });
 
-  const configService = app.get(ConfigService);
+  // ── Body parser — MUST be first middleware ────────────────────────────────
+  // 20 MB gives plenty of headroom for compressed face photos (~50–200 KB).
+  app.use(express.json({ limit: '20mb' }));
+  app.use(express.urlencoded({ limit: '20mb', extended: true }));
 
-  // Security headers — hardened CSP, HSTS, referrer policy (SEC-1)
+  const configService = app.get(ConfigService);
   const isProduction = configService.get('NODE_ENV') === 'production';
+
+  // ── Security headers ──────────────────────────────────────────────────────
   app.use(
     helmet.default({
       contentSecurityPolicy: {
@@ -25,7 +34,6 @@ async function bootstrap() {
           scriptSrc: ["'self'"],
           styleSrc: ["'self'", "'unsafe-inline'"],
           imgSrc: ["'self'", 'data:', 'blob:'],
-          // Allow WebSocket connections to the backend itself
           connectSrc: ["'self'", 'ws:', 'wss:'],
           fontSrc: ["'self'"],
           frameSrc: ["'none'"],
@@ -37,26 +45,17 @@ async function bootstrap() {
         ? { maxAge: 31_536_000, includeSubDomains: true, preload: true }
         : false,
       referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-      // Prevent MIME-type sniffing (SEC: MIME sniffing)
       noSniff: true,
-      // Prevent clickjacking
       frameguard: { action: 'deny' },
-      // Remove X-Powered-By (information disclosure)
       hidePoweredBy: true,
     }),
   );
 
-  // Raise body-parser limits so face photo uploads (base64 ≈ 3–10 MB) don't fail.
-  // Default NestJS/Express limit is 100 KB which truncates any image payload.
-  app.use(express.json({ limit: '20mb' }));
-  app.use(express.urlencoded({ limit: '20mb', extended: true }));
-
-  // Response compression for JSON payloads (analytics, embeddings, etc.)
+  // ── Compression ───────────────────────────────────────────────────────────
   app.use(compression());
 
-
-  // CORS
-  // NOTE: credentials:true + origin:'*' is rejected by browsers.
+  // ── CORS ──────────────────────────────────────────────────────────────────
+  // credentials:true + origin:'*' is rejected by browsers.
   // When CORS_ORIGIN is '*' we reflect the request origin so credentials work.
   const corsOrigin = configService.get<string>('CORS_ORIGIN', '*');
   const allowedOrigins = corsOrigin === '*' ? null : corsOrigin.split(',').map((o) => o.trim());
@@ -65,14 +64,14 @@ async function bootstrap() {
     origin: allowedOrigins
       ? allowedOrigins
       : (requestOrigin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-          callback(null, true); // reflect all origins in dev (no explicit list)
+          callback(null, true);
         },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
   });
 
-  // Global validation pipe
+  // ── Validation pipe ───────────────────────────────────────────────────────
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -82,17 +81,17 @@ async function bootstrap() {
     }),
   );
 
-  // Bug 3 fix: GlobalExceptionFilter is now registered via APP_FILTER in AppModule (DI-aware).
+  // GlobalExceptionFilter is registered via APP_FILTER in AppModule (DI-aware).
   // DO NOT add app.useGlobalFilters() here — it would create a second, non-DI instance.
 
-  // API prefix
+  // ── API prefix ────────────────────────────────────────────────────────────
   app.setGlobalPrefix('api');
 
-  // Graceful shutdown
+  // ── Graceful shutdown ─────────────────────────────────────────────────────
   app.enableShutdownHooks();
 
-  // Swagger (dev only)
-  if (configService.get('NODE_ENV') !== 'production') {
+  // ── Swagger (dev only) ────────────────────────────────────────────────────
+  if (!isProduction) {
     const swaggerConfig = new DocumentBuilder()
       .setTitle('Madad Vision AI API')
       .setDescription('REST API for Madad Vision AI surveillance platform')
