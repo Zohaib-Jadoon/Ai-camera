@@ -5,6 +5,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import * as helmet from 'helmet';
 import compression from 'compression';
 import { ConfigService } from '@nestjs/config';
+import * as express from 'express';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
@@ -45,8 +46,14 @@ async function bootstrap() {
     }),
   );
 
+  // Raise body-parser limits so face photo uploads (base64 ≈ 3–10 MB) don't fail.
+  // Default NestJS/Express limit is 100 KB which truncates any image payload.
+  app.use(express.json({ limit: '20mb' }));
+  app.use(express.urlencoded({ limit: '20mb', extended: true }));
+
   // Response compression for JSON payloads (analytics, embeddings, etc.)
   app.use(compression());
+
 
   // CORS
   // NOTE: credentials:true + origin:'*' is rejected by browsers.

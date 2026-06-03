@@ -36,18 +36,38 @@ export default function FacesPage() {
   });
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
 
+  /** Resize + re-encode image to JPEG 80% quality, max 640px — keeps payload under 200 KB. */
+  const compressImage = (dataUrl: string): Promise<string> =>
+    new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX = 640;
+        let { width, height } = img;
+        if (width > MAX || height > MAX) {
+          if (width > height) { height = Math.round((height * MAX) / width); width = MAX; }
+          else { width = Math.round((width * MAX) / height); height = MAX; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d')!.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', 0.8));
+      };
+      img.src = dataUrl;
+    });
+
   const handleFileUpload = (personId: string, e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = async (event) => {
-      const base64 = event.target?.result as string;
+      const raw = event.target?.result as string;
       try {
-        await uploadImage.mutateAsync({ personId, imageB64: base64 });
+        const compressed = await compressImage(raw);
+        await uploadImage.mutateAsync({ personId, imageB64: compressed });
         setUploadStatus({ id: personId, ok: true, msg: 'Face enrolled ✓' });
         setTimeout(() => setUploadStatus(null), 3000);
       } catch (err: any) {
-        setUploadStatus({ id: personId, ok: false, msg: err.response?.data?.message || 'Upload failed' });
+        setUploadStatus({ id: personId, ok: false, msg: err.response?.data?.message || err.message || 'Upload failed' });
         setTimeout(() => setUploadStatus(null), 4000);
       }
     };
@@ -59,10 +79,14 @@ export default function FacesPage() {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (ev) => setPendingPhoto(ev.target?.result as string);
+    reader.onload = async (ev) => {
+      const compressed = await compressImage(ev.target?.result as string);
+      setPendingPhoto(compressed);
+    };
     reader.readAsDataURL(file);
     e.target.value = '';
   };
+
 
   const startEdit = (person: Person) => {
     setEditingId(person.id);

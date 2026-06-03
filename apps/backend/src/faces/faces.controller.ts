@@ -1,7 +1,9 @@
 import {
   Controller, Get, Post, Patch, Delete, Body, Query, Param, UseGuards,
-  DefaultValuePipe, ParseIntPipe, HttpCode, HttpStatus, BadRequestException, Inject, forwardRef, Logger,
+  DefaultValuePipe, ParseIntPipe, HttpCode, HttpStatus, BadRequestException,
+  ServiceUnavailableException, Inject, forwardRef, Logger,
 } from '@nestjs/common';
+
 import { FacesService } from './faces.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
@@ -105,13 +107,25 @@ export class FacesController {
     try {
       const embedding = await this.eventsGateway.extractFaceEmbedding(imageB64);
       const saved = await this.facesService.addEmbedding(personId, embedding);
+      // Persist the photo so the UI card can show a preview
+      await this.facesService.updatePerson(personId, { photo_url: imageB64 });
       const allEmbeddings = await this.facesService.getAllEmbeddings();
-      this.eventsGateway.server.emit('sync_embeddings', allEmbeddings);
+      if (this.eventsGateway.server) {
+        this.eventsGateway.server.emit('sync_embeddings', allEmbeddings);
+      }
       return saved;
-    } catch (err) {
-      throw new BadRequestException(err.message || 'Failed to extract face embedding');
+    } catch (err: any) {
+      const msg: string = err?.message || 'Failed to extract face embedding';
+      if (msg.includes('not connected') || msg.includes('AI Engine')) {
+        throw new ServiceUnavailableException('AI Engine is not connected — start the AI engine and try again');
+      }
+      if (msg.includes('No face detected') || msg.includes('No face')) {
+        throw new BadRequestException('No face detected in the image — use a clear front-facing photo');
+      }
+      throw new BadRequestException(msg);
     }
   }
+
 
   @Get('events')
   @ApiOperation({ summary: 'Get face recognition events' })
