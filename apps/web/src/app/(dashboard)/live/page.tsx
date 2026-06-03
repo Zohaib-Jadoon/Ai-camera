@@ -125,8 +125,16 @@ export default function LiveMonitoring() {
   // Real-time camera status updates via WebSocket
   useEffect(() => {
     const socket = getSocket();
-    const handler = () => {
-      // Invalidate cameras cache so the grid re-renders with updated ONLINE/OFFLINE
+    const handler = (payload: { camera_id: string; status: string }) => {
+      // Instantly patch the in-memory cache so the UI flips ONLINE/OFFLINE
+      // immediately — no network round-trip needed for a simple status field.
+      qc.setQueryData<import('@/hooks/use-api').Camera[]>(['cameras'], (old) => {
+        if (!old) return old;
+        return old.map((cam) =>
+          cam.id === payload.camera_id ? { ...cam, status: payload.status } : cam
+        );
+      });
+      // Also invalidate so any other stale fields (last_seen etc.) refresh soon
       qc.invalidateQueries({ queryKey: ['cameras'] });
     };
     socket.on('camera_status', handler);

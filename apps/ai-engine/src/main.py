@@ -451,10 +451,22 @@ async def process_camera(camera: dict):
     except Exception as e:
         logger.error(f"Camera {camera_id}: stream start failed: {e}. Using synthetic frames.")
 
+    # Grace period: give the background read thread time to open the RTSP
+    # connection before the main loop starts emitting status.  Without this,
+    # the loop fires immediately and emits OFFLINE (stream not yet open).
+    logger.info(f"Camera {camera_id}: waiting up to 8s for stream to come online...")
+    for _ in range(16):  # 16 × 0.5s = 8s max
+        if stream.is_online:
+            logger.info(f"Camera {camera_id}: stream online after startup wait")
+            break
+        await asyncio.sleep(0.5)
+    else:
+        logger.warning(f"Camera {camera_id}: stream not online after 8s — will keep retrying")
+
     consecutive_errors = 0
     max_errors = 10
     last_status: str | None = None  # track last emitted status to avoid spamming
-    status_report_interval = 10    # emit status every N seconds
+    status_report_interval = 5     # emit status every N seconds (5s for responsive UI)
     last_status_report = 0.0
 
     loop = asyncio.get_event_loop()

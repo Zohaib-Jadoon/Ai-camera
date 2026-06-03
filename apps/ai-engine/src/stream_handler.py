@@ -38,6 +38,7 @@ class StreamHandler:
         self._thread: threading.Thread | None = None
         self._connected = False  # tracks whether stream is actually delivering frames
         self._fail_count: int = 0  # consecutive open failures for backoff
+        self._last_frame_time: float = 0.0  # monotonic time of last successful frame
 
 
     def start(self) -> None:
@@ -154,7 +155,11 @@ class StreamHandler:
         """Background thread that continuously reads frames."""
         while self._running:
             if self._cap is None or not self._cap.isOpened():
-                self._connected = False
+                # Only mark offline if we were previously connected — avoids
+                # a false OFFLINE flash before the first successful open.
+                if self._connected:
+                    self._connected = False
+                    logger.warning(f"Stream {self.source} lost — reconnecting")
                 # Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped)
                 delay = min(
                     _RECONNECT_BASE_DELAY * (2 ** self._fail_count),
@@ -176,6 +181,7 @@ class StreamHandler:
                 with self._lock:
                     self._latest_frame = frame
                     self.frame_count += 1
+                    self._last_frame_time = time.monotonic()
                     if not self._connected:
                         self._connected = True
                         self._fail_count = 0  # reset backoff on first successful frame
@@ -218,5 +224,16 @@ class StreamHandler:
 
     @property
     def is_online(self) -> bool:
-        """True when the stream is open and delivering frames."""
-        return self._connected
+        """True when the stream is open and delivering frames.
+        
+        Returns False if:
+        - Stream was never opened successfully
+        - Stream was opened but no frames arrived within 15 seconds
+        - Stream was stopped
+        """
+        if not self._connected:
+            return False
+        # If we haven't received a frame in 15 seconds, consider it offline
+        if self._last_frame_time > 0 and (time.monotonic() - self._last_frame_time) > 15.0:
+            return False
+        return True
