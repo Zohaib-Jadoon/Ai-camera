@@ -1,4 +1,18 @@
-fastapi
-uvicorn
-ultralytics
-opencv-python-headless
+python-socketio>=5.11.4
+python-dotenv>=1.0.0
+opencv-python-headless>=4.10.0
+numpy>=2.4.6
+msvc-runtime>=14.40.0
+ultralytics>=8.2.0
+onnxruntime>=1.18.0
+scikit-learn>=1.5.1
+scipy>=1.13.0
+insightface>=0.7.3
+
+# ── Optional: Advanced AI features ──────────────────────────────────
+# Uncomment the features you want to enable:
+# easyocr>=1.7.1          # License Plate Recognition (LPR)
+# torch>=2.2.0            # Cross-Camera ReID + CLIP search
+# torchvision>=0.17.0     # ReID appearance embeddings (ResNet-18)
+# openai-clip             # Natural language video search (CLIP)
+# Pillow>=10.0.0          # Image processing for CLIP/ReID

@@ -16,12 +16,11 @@ export class EventsService {
   }): Promise<Detection> {
     return this.prisma.detection.create({
       data: {
-        cameraId: data.camera_id,
-        objectType: data.object_type,
+        camera_id: data.camera_id,
+        object_type: data.object_type,
         confidence: data.confidence,
         timestamp: new Date(data.timestamp),
-        snapshotUrl: data.snapshot_url,
-        bbox: data.bbox,
+        snapshot_url: data.snapshot_url,
       },
     });
   }

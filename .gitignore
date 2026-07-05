@@ -9,3 +9,17 @@ venv
 __pycache__
 *.pyc
 *.pt
+
+# Temporary/Cache folders
+.agents
+.context
+temp-project-repo
+graphify-out
+apps/graphify-out
+debug_test
+Madad_Vision_AI_Client_Briefing.pdf
+
+# Editor & Tool Cache metadata
+.vscode/
+.graphify_python
+skills-lock.json

@@ -10,8 +10,10 @@
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present"
   },
+  "devDependencies": {
+    "typescript": "^5.8.2"
+  },
   "dependencies": {
-    "react": "19.0.0",
-    "react-dom": "19.0.0"
+    "lightningcss-win32-x64-msvc": "^1.32.0"
   }
 }

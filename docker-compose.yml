@@ -1,59 +1,143 @@
+version: '3.8'
+
 services:
-  db:
-    image: postgres:15-alpine
-    restart: always
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
       POSTGRES_DB: madad_vision
+      POSTGRES_USER: ${POSTGRES_USER:-madad}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-madad_secret_2024}
     ports:
       - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-madad}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
-  redis:
-    image: redis:7-alpine
-    restart: always
+  # Valkey: open-source Redis-compatible cache (Linux Foundation fork)
+  valkey:
+    image: valkey/valkey:latest
+    restart: unless-stopped
     ports:
       - "6379:6379"
+    command: valkey-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ./apps/backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-madad}:${POSTGRES_PASSWORD:-madad_secret_2024}@postgres:5432/${POSTGRES_DB:-madad_vision}
+      JWT_SECRET: ${JWT_SECRET:-change-this-to-a-secure-32-char-secret!}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-change-this-refresh-secret-too!!}
+      CACHE_URL: redis://valkey:6379
+      AI_ENGINE_URL: http://ai-engine:8000
+      AI_ENGINE_KEY: ${AI_ENGINE_KEY:-default-secret-key}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
+      STORAGE_PATH: /app/snapshots
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@madadvision.ai}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      S3_BUCKET: ${S3_BUCKET:-madad-snapshots}
+      NODE_ENV: ${NODE_ENV:-production}
+    volumes:
+      - snapshots:/app/snapshots
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+
+  ai-engine:
+    build:
+      context: ./apps/ai-engine
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      BACKEND_WS_URL: http://backend:3001
+      BACKEND_REST_URL: http://backend:3001
+      MODEL_CONFIDENCE_THRESHOLD: ${MODEL_CONFIDENCE_THRESHOLD:-0.55}
+      SNAPSHOT_DIR: /app/snapshots
+      NODE_ENV: ${NODE_ENV:-production}
+    volumes:
+      - snapshots:/app/snapshots
+    depends_on:
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+        reservations:
+          memory: 2g
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
+      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-http://localhost:3001}
+      NODE_ENV: ${NODE_ENV:-production}
+    depends_on:
+      - backend
 
   minio:
-    image: minio/minio
-    restart: always
+    image: minio/minio:latest
+    restart: unless-stopped
     ports:
       - "9000:9000"
       - "9001:9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio_data:/data
     command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  backend:
-    build:
-      context: .
-      dockerfile: apps/backend/Dockerfile
-    environment:
-      DATABASE_URL: postgresql://user:password@db:5432/madad_vision
-      JWT_SECRET: supersecret
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
     ports:
-      - "3001:3000"
+      - "80:80"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
-      - db
-
-  web:
-    build:
-      context: .
-      dockerfile: apps/web/Dockerfile
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:3001
-    ports:
-      - "3000:3000"
-    depends_on:
+      - web
       - backend
+      - ai-engine
 
-  ai-engine:
-    build:
-      context: .
-      dockerfile: apps/ai-engine/Dockerfile
-    environment:
-      BACKEND_URL: http://backend:3000
-    depends_on:
-      - backend
+volumes:
+  pgdata:
+    driver: local
+  snapshots:
+    driver: local
+  minio_data:
+    driver: local

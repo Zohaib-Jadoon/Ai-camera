@@ -1,23 +1,8 @@
-import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+'use client';
+
 import "./globals.css";
-import Sidebar from "@/components/Sidebar";
-import AlertToast from "@/components/AlertToast";
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
-export const metadata: Metadata = {
-  title: "Madad Vision AI",
-  description: "AI-Powered Smart CCTV Surveillance",
-};
+import { QueryProvider } from "@/providers/query-provider";
+import CustomCursor from "@/components/CustomCursor";
 
 export default function RootLayout({
   children,
@@ -25,16 +10,18 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html
-      lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
-    >
-      <body className="min-h-full flex bg-gray-100">
-        <Sidebar />
-        <main className="flex-1 p-8">
+    <html lang="en" className="h-full">
+      <head>
+        <title>Madad Vision AI — Enterprise Surveillance Suite</title>
+        <meta name="description" content="Enterprise-grade AI CCTV surveillance platform with real-time face detection, perimeter intrusion, and PPE compliance monitoring." />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="theme-color" content="#03050a" />
+      </head>
+      <body className="h-full bg-[#03050a] text-slate-100" style={{ fontFamily: "'Outfit', system-ui, sans-serif" }}>
+        <QueryProvider>
+          <CustomCursor />
           {children}
-        </main>
-        <AlertToast />
+        </QueryProvider>
       </body>
     </html>
   );
