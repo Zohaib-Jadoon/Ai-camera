@@ -3,7 +3,8 @@
  *
  * Flow:
  *   1. AI Engine emits `start_recording` Socket.IO event when a detection fires.
- *   2. EventsGateway calls `startClip()` which creates a Recording row and spawns FFmpeg.
+ *   2. EventsGateway calls `startClip()` which checks cooldown/active status,
+ *      creates a Recording row and spawns FFmpeg.
  *   3. FFmpeg records to a temporary file, which is then read into a binary Buffer,
  *      stored directly into the `Recording.video_data` byte column in PostgreSQL DB,
  *      and the temporary local file is deleted immediately.
@@ -19,9 +20,13 @@ import { path as ffmpegPath } from '@ffmpeg-installer/ffmpeg';
 const TEMP_RECORDINGS_DIR =
   process.env.TEMP_RECORDINGS_DIR ?? path.join(process.cwd(), 'temp_recordings');
 
+const RECORDING_COOLDOWN_MS = 60_000; // 60s cooldown per camera between recording triggers
+
 @Injectable()
 export class RecordingService {
   private readonly logger = new Logger(RecordingService.name);
+  private activeCameras = new Set<string>();
+  private lastRecordingMap = new Map<string, number>();
 
   constructor(private readonly prisma: PrismaService) {
     if (!fs.existsSync(TEMP_RECORDINGS_DIR)) {
@@ -38,6 +43,23 @@ export class RecordingService {
     durationSec = 30,
     rtspUrl?: string,
   ) {
+    const now = Date.now();
+    const lastTime = this.lastRecordingMap.get(cameraId) ?? 0;
+
+    // Check if camera is currently recording or in cooldown window
+    if (this.activeCameras.has(cameraId)) {
+      this.logger.debug(`Recording skipped: camera ${cameraId} is currently recording`);
+      return null;
+    }
+
+    if (now - lastTime < RECORDING_COOLDOWN_MS) {
+      this.logger.debug(`Recording skipped: camera ${cameraId} is in cooldown window`);
+      return null;
+    }
+
+    this.activeCameras.add(cameraId);
+    this.lastRecordingMap.set(cameraId, now);
+
     const startedAt = new Date();
     const tempFilename = `temp_${cameraId}_${startedAt.getTime()}.mp4`;
     const tempFilepath = path.join(TEMP_RECORDINGS_DIR, tempFilename);
@@ -63,6 +85,7 @@ export class RecordingService {
           .outputOptions(['-t', `${durationSec}`, '-c:v', 'copy', '-an'])
           .output(tempFilepath)
           .on('end', async () => {
+            this.activeCameras.delete(cameraId);
             try {
               if (fs.existsSync(tempFilepath)) {
                 const buffer = fs.readFileSync(tempFilepath);
@@ -89,16 +112,19 @@ export class RecordingService {
             }
           })
           .on('error', (err) => {
-            this.logger.error(`Recording FFmpeg error: ${err.message}`);
+            this.activeCameras.delete(cameraId);
+            this.logger.warn(`Recording FFmpeg notice: ${err.message}`);
             if (fs.existsSync(tempFilepath)) {
-              fs.unlinkSync(tempFilepath);
+              try { fs.unlinkSync(tempFilepath); } catch {}
             }
           })
           .run();
       } catch (err: any) {
+        this.activeCameras.delete(cameraId);
         this.logger.error(`Failed to spawn FFmpeg: ${err.message}`);
       }
     } else {
+      this.activeCameras.delete(cameraId);
       this.logger.warn(
         `Skipping FFmpeg spawn — rtspUrl=${rtspUrl ? 'set' : 'missing'}, ffmpegPath=${ffmpegPath ? 'found' : 'missing'}`,
       );
