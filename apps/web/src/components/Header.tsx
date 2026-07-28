@@ -169,6 +169,7 @@ export default function Header() {
             <nav className="flex flex-col gap-1 overflow-y-auto">
               {navItems.map((item) => {
                 const isActive = pathname === item.href || (item.href !== '/' && pathname.startsWith(item.href));
+                const Icon = item.icon as React.ComponentType<{ className?: string }>;
                 return (
                   <Link
                     key={item.href}
@@ -181,7 +182,7 @@ export default function Header() {
                         : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
                     )}
                   >
-                    <item.icon className={cn("w-5 h-5", isActive ? "text-blue-400" : "text-slate-500")} />
+                    <Icon className={cn("w-5 h-5", isActive ? "text-blue-400" : "text-slate-500")} />
                     <span>{item.name}</span>
                   </Link>
                 );

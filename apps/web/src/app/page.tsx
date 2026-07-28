@@ -1,129 +1,431 @@
 'use client';
 
-import { motion } from 'framer-motion';
-import { ArrowRight, Shield, Activity, Video, Users, Lock, ChevronRight } from 'lucide-react';
+import { useRef, useEffect } from 'react';
 import Link from 'next/link';
+import Image from 'next/image';
+import { motion, useScroll, useSpring } from 'framer-motion';
 import MarketingNav from '@/components/MarketingNav';
+import BackgroundParticles from '@/components/BackgroundParticles';
+import Scene3D from '@/components/Scene3D';
+import AIVideoDemo from '@/components/AIVideoDemo';
+import SystemPipeline from '@/components/SystemPipeline';
+import BentoGrid from '@/components/BentoGrid';
+import {
+  ArrowRight, Shield, Cpu, Zap, Activity, Eye, Car,
+  Siren, ShieldAlert, Sparkles, Fingerprint, Users, CheckCircle2, Layers
+} from 'lucide-react';
 
-export default function LandingPage() {
-  const containerVariants = {
-    hidden: { opacity: 0 },
-    visible: { opacity: 1, transition: { staggerChildren: 0.15 } }
-  } as const;
+const fFadeUp = {
+  hidden: { opacity: 0, y: 24 },
+  visible: { opacity: 1, y: 0, transition: { duration: 0.7, ease: [0.16, 1, 0.3, 1] as const } }
+};
 
-  const itemVariants = {
-    hidden: { opacity: 0, y: 30 },
-    visible: { opacity: 1, y: 0, transition: { type: 'spring' as const, stiffness: 300, damping: 24 } }
-  };
+const fStagger = {
+  visible: { transition: { staggerChildren: 0.1 } }
+};
+
+export default function Home() {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const scrollProgressRef = useRef<number>(0);
+
+  const { scrollYProgress } = useScroll({
+    target: containerRef,
+    offset: ['start start', 'end end']
+  });
+
+  const smoothProgress = useSpring(scrollYProgress, {
+    damping: 25,
+    stiffness: 80,
+    restDelta: 0.001
+  });
+
+  useEffect(() => {
+    return smoothProgress.on('change', (latest) => {
+      scrollProgressRef.current = latest;
+    });
+  }, [smoothProgress]);
 
   return (
-    <div className="min-h-screen bg-[#020617] text-slate-200 font-sans">
+    <div ref={containerRef} className="relative min-h-screen bg-[#050814] text-slate-100 selection:bg-sky-500/20 selection:text-sky-300 overflow-x-hidden">
+      {/* Ambient background layers */}
+      <BackgroundParticles />
+      <Scene3D scrollProgress={scrollProgressRef} />
       <MarketingNav />
 
       {/* Hero Section */}
-      <section className="relative pt-32 pb-20 md:pt-48 md:pb-32 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto flex flex-col items-center text-center">
-        {/* Background glow */}
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-blue-600/10 rounded-full blur-[100px] pointer-events-none" />
-        <div className="absolute top-1/4 right-1/4 w-[400px] h-[400px] bg-purple-600/10 rounded-full blur-[100px] pointer-events-none" />
-
-        <motion.div variants={containerVariants} initial="hidden" animate="visible" className="relative z-10 max-w-4xl mx-auto">
-          <motion.div variants={itemVariants} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-400 text-sm font-semibold mb-6">
-            <span className="flex h-2 w-2 rounded-full bg-blue-500" />
-            Madad Vision AI 2.0 is now live
-          </motion.div>
+      <section className="relative min-h-screen flex items-center pt-28 pb-20 z-10 px-6 sm:px-10 max-w-7xl mx-auto">
+        <div className="w-full grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
           
-          <motion.h1 variants={itemVariants} className="text-5xl md:text-7xl font-extrabold tracking-tight mb-6 leading-tight text-white">
-            Enterprise Surveillance, <br/>
-            <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-500">Powered by AI.</span>
-          </motion.h1>
+          <motion.div
+            initial="hidden"
+            animate="visible"
+            variants={fStagger}
+            className="lg:col-span-7 flex flex-col gap-6"
+          >
+            <motion.div
+              variants={fFadeUp}
+              className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-sky-500/10 border border-sky-400/20 text-xs text-sky-400 font-bold w-max uppercase tracking-wider font-mono-data shadow-lg shadow-sky-500/5"
+            >
+              <Shield className="w-4 h-4 text-sky-400" />
+              <span>ENTERPRISE AI SURVEILLANCE PLATFORM</span>
+              <Sparkles className="w-3.5 h-3.5 text-sky-300 animate-pulse" />
+            </motion.div>
 
-          <motion.p variants={itemVariants} className="text-lg md:text-xl text-slate-400 mb-10 max-w-2xl mx-auto leading-relaxed">
-            Transform ordinary CCTV cameras into intelligent monitoring systems. Detect humans, vehicles, and unrecognized faces with real-time analytics and alerts.
-          </motion.p>
+            <motion.h1
+              variants={fFadeUp}
+              className="text-4xl sm:text-6xl font-extrabold tracking-tight leading-[1.1] font-mono-data text-white"
+            >
+              CYBERNETIC VISION <br />
+              <span className="text-gradient">FOR CITY-WIDE SAFETY</span>
+            </motion.h1>
 
-          <motion.div variants={itemVariants} className="flex flex-col sm:flex-row items-center justify-center gap-4">
-            <Link href="/register" className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold transition-all shadow-[0_0_20px_rgba(37,99,235,0.4)] hover:shadow-[0_0_30px_rgba(37,99,235,0.6)] flex items-center justify-center gap-2 group">
-              Get Started Now <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-            </Link>
-            <Link href="/contact" className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-bold transition-all flex items-center justify-center gap-2">
-              Contact Sales
-            </Link>
-          </motion.div>
-        </motion.div>
+            <motion.p
+              variants={fFadeUp}
+              className="text-sm sm:text-lg text-slate-300 max-w-xl leading-relaxed font-sans"
+            >
+              Madad Vision orchestrates enterprise CCTV networks into real-time threat-detection hubs using edge computing, deep learning, weapon recognition & instantaneous alert dispatch.
+            </motion.p>
 
-        {/* Dashboard Preview Mockup */}
-        <motion.div 
-          initial={{ opacity: 0, y: 100 }} 
-          animate={{ opacity: 1, y: 0 }} 
-          transition={{ duration: 1, delay: 0.5, type: "spring" }}
-          className="relative mt-20 w-full max-w-5xl rounded-2xl overflow-hidden border border-slate-700/50 shadow-2xl glass-card"
-        >
-          <div className="absolute inset-0 bg-gradient-to-t from-[#020617] via-transparent to-transparent z-10" />
-          <div className="h-8 bg-slate-900 border-b border-slate-800 flex items-center px-4 gap-2">
-            <div className="w-3 h-3 rounded-full bg-red-500/80" />
-            <div className="w-3 h-3 rounded-full bg-amber-500/80" />
-            <div className="w-3 h-3 rounded-full bg-emerald-500/80" />
-          </div>
-          <div className="aspect-video bg-slate-950 p-6 flex flex-col gap-4 relative">
-            <div className="flex justify-between items-center opacity-50">
-              <div className="h-6 w-48 bg-slate-800 rounded-md" />
-              <div className="h-6 w-24 bg-slate-800 rounded-md" />
-            </div>
-            <div className="flex-1 grid grid-cols-1 md:grid-cols-3 gap-4 opacity-50">
-              <div className="md:col-span-2 bg-slate-800 rounded-lg border border-slate-700 min-h-[120px]" />
-              <div className="md:col-span-1 grid grid-rows-3 gap-4 min-h-[120px]">
-                <div className="bg-slate-800 rounded-lg border border-slate-700" />
-                <div className="bg-slate-800 rounded-lg border border-slate-700" />
-                <div className="bg-slate-800 rounded-lg border border-slate-700" />
+            <motion.div variants={fFadeUp} className="flex flex-wrap items-center gap-4 pt-2">
+              <Link
+                href="/login"
+                className="group px-7 py-3.5 rounded-xl bg-gradient-to-r from-sky-400 via-sky-500 to-indigo-600 text-white font-bold text-xs sm:text-sm flex items-center gap-2.5 transition-all duration-300 shadow-xl shadow-sky-500/20 hover:shadow-2xl hover:shadow-sky-500/35 hover:scale-105 font-mono-data"
+              >
+                <span>ACCESS COMMAND CONSOLE</span>
+                <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" />
+              </Link>
+              <Link
+                href="/about"
+                className="px-7 py-3.5 rounded-xl bg-white/[0.03] border border-white/10 hover:bg-white/[0.08] hover:border-sky-400/30 transition-all font-bold text-xs sm:text-sm text-slate-200 font-mono-data"
+              >
+                PLATFORM OVERVIEW
+              </Link>
+            </motion.div>
+
+            {/* Quick Metrics Bar */}
+            <motion.div variants={fFadeUp} className="grid grid-cols-3 gap-4 pt-6 border-t border-white/[0.08] max-w-lg mt-2">
+              <div>
+                <p className="text-xl sm:text-2xl font-black text-white font-mono-data">0.5ms</p>
+                <p className="text-[10px] text-sky-400 uppercase font-mono-data tracking-wider font-semibold">REACTION TIME</p>
               </div>
+              <div>
+                <p className="text-xl sm:text-2xl font-black text-emerald-400 font-mono-data">99.8%</p>
+                <p className="text-[10px] text-emerald-400 uppercase font-mono-data tracking-wider font-semibold">ACCURACY RATE</p>
+              </div>
+              <div>
+                <p className="text-xl sm:text-2xl font-black text-indigo-400 font-mono-data">30+ FPS</p>
+                <p className="text-[10px] text-indigo-400 uppercase font-mono-data tracking-wider font-semibold">EDGE STREAMING</p>
+              </div>
+            </motion.div>
+          </motion.div>
+
+          {/* Hero Feature Preview Frame */}
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 0.9, delay: 0.2 }}
+            className="lg:col-span-5 relative rounded-2xl overflow-hidden glass-panel p-2 border border-sky-500/30 shadow-2xl group"
+          >
+            <Image
+              src="/images/hero_surveillance_3d.png"
+              alt="Madad Vision 3D AI Command Center HUD"
+              width={700}
+              height={450}
+              className="rounded-xl object-cover w-full group-hover:scale-105 transition-transform duration-700"
+              priority
+            />
+            <div className="absolute top-4 left-4 px-3 py-1.5 rounded-lg bg-slate-900/90 border border-sky-400/40 text-xs font-bold text-sky-300 font-mono-data flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 live-indicator" />
+              <span>COMMAND CORE ONLINE</span>
             </div>
-          </div>
-        </motion.div>
+          </motion.div>
+
+        </div>
       </section>
 
-      {/* Features Section */}
-      <section className="py-24 bg-[#040b1c] border-t border-slate-800/50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="text-center mb-16">
-            <h2 className="text-3xl md:text-4xl font-bold text-white mb-4">Complete Security Arsenal</h2>
-            <p className="text-slate-400 max-w-2xl mx-auto">Everything you need to secure your premises, monitor activities, and respond to threats instantly.</p>
+      {/* Interactive Neural Pipeline Section */}
+      <section className="relative py-20 z-10 px-6 sm:px-10 max-w-7xl mx-auto border-t border-white/[0.06]">
+        <div className="flex flex-col gap-4 mb-10 text-center max-w-2xl mx-auto">
+          <div className="inline-flex items-center justify-center gap-2 px-3.5 py-1 rounded-full bg-sky-500/10 border border-sky-400/20 text-xs text-sky-400 font-bold uppercase tracking-wider font-mono-data w-max mx-auto">
+            <Cpu className="w-4 h-4" /> HIGH-THROUGHPUT NEURAL PIPELINE
+          </div>
+          <h2 className="text-3xl sm:text-4xl font-bold font-mono-data text-white">SYSTEM ARCHITECTURE</h2>
+          <p className="text-xs sm:text-sm text-slate-300 font-sans">Interactive 4-stage pipeline operating at sub-millisecond edge latency.</p>
+        </div>
+        <SystemPipeline />
+      </section>
+
+      {/* Feature 1: AI Traffic & Congestion Monitoring */}
+      <section className="relative py-24 z-10 px-6 sm:px-10 max-w-7xl mx-auto border-t border-white/[0.06]">
+        <div className="w-full grid grid-cols-1 lg:grid-cols-2 gap-16 items-center">
+          
+          <div className="relative rounded-2xl overflow-hidden glass-panel p-2 border border-sky-500/30 shadow-2xl group">
+            <Image
+              src="/images/traffic_congestion_3d.png"
+              alt="AI Smart Traffic & Congestion Line Detection"
+              width={700}
+              height={440}
+              className="rounded-xl object-cover w-full group-hover:scale-105 transition-transform duration-700"
+            />
+            <div className="absolute top-4 left-4 px-3 py-1.5 rounded-lg bg-slate-900/90 border border-sky-400/40 text-xs font-bold text-sky-300 font-mono-data flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 live-indicator" />
+              <span>LIVE TRAFFIC THRESHOLD DETECTOR</span>
+            </div>
           </div>
 
-          <div className="grid md:grid-cols-3 gap-8">
-            {[
-              { icon: Activity, title: "Real-time Detection", desc: "Instant detection of humans, vehicles, and objects with 99% accuracy.", color: "text-blue-400", bg: "bg-blue-500/10" },
-              { icon: Users, title: "Face Recognition", desc: "Identify authorized personnel and alert on unknown faces instantly.", color: "text-purple-400", bg: "bg-purple-500/10" },
-              { icon: Shield, title: "Boundary Intrusion", desc: "Draw custom virtual tripwires and polygons to protect secure zones.", color: "text-emerald-400", bg: "bg-emerald-500/10" },
-              { icon: Video, title: "Multi-Camera Streaming", desc: "Monitor unlimited RTSP streams seamlessly on a single unified dashboard.", color: "text-amber-400", bg: "bg-amber-500/10" },
-              { icon: Lock, title: "Encrypted Storage", desc: "All snapshots and event logs are stored securely using AES-256 encryption.", color: "text-red-400", bg: "bg-red-500/10" },
-              { icon: ChevronRight, title: "Instant Alerts", desc: "Receive mobile push notifications and WebSocket alerts within milliseconds.", color: "text-cyan-400", bg: "bg-cyan-500/10" },
-            ].map((f, i) => (
-              <motion.div 
-                key={i}
-                initial={{ opacity: 0, y: 20 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true }}
-                transition={{ delay: i * 0.1 }}
-                className="glass-card p-6 rounded-2xl border border-slate-800/60 hover:border-slate-700 transition-colors"
-              >
-                <div className={`w-12 h-12 rounded-xl flex items-center justify-center mb-4 ${f.bg}`}>
-                  <f.icon className={`w-6 h-6 ${f.color}`} />
-                </div>
-                <h3 className="text-xl font-bold text-white mb-2">{f.title}</h3>
-                <p className="text-slate-400 text-sm leading-relaxed">{f.desc}</p>
-              </motion.div>
-            ))}
-          </div>
+          <motion.div
+            initial="hidden"
+            whileInView="visible"
+            viewport={{ once: true, margin: '-20%' }}
+            variants={fStagger}
+            className="flex flex-col gap-6"
+          >
+            <motion.div
+              variants={fFadeUp}
+              className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-xs text-amber-400 font-bold w-max uppercase tracking-wider font-mono-data"
+            >
+              <Car className="w-4 h-4" /> TRAFFIC & CONGESTION THRESHOLDS
+            </motion.div>
+
+            <motion.h2 variants={fFadeUp} className="text-3xl sm:text-4xl font-bold font-mono-data leading-tight text-white">
+              SMART BOUNDARY LINE <br />
+              <span className="text-gradient">CONGESTION DETECTOR</span>
+            </motion.h2>
+
+            <motion.p variants={fFadeUp} className="text-slate-300 leading-relaxed text-sm sm:text-base font-sans">
+              Set custom polygon boundary lines across highways or city intersections. When vehicle queues stack behind the threshold line, receive instant high-priority alerts with automated vehicle volume counters.
+            </motion.p>
+
+            <motion.div variants={fFadeUp} className="grid grid-cols-2 gap-4 mt-2">
+              <div className="p-4 rounded-xl glass-card border border-white/[0.06]">
+                <p className="text-lg font-bold text-amber-400 font-mono-data">AUTO QUEUE</p>
+                <p className="text-xs text-slate-400 mt-1">Detects stopped traffic behind boundary line</p>
+              </div>
+              <div className="p-4 rounded-xl glass-card border border-white/[0.06]">
+                <p className="text-lg font-bold text-sky-400 font-mono-data">SPEED TELEMETRY</p>
+                <p className="text-xs text-slate-400 mt-1">Real-time km/h tracking per lane</p>
+              </div>
+            </motion.div>
+          </motion.div>
+
         </div>
+      </section>
+
+      {/* High-Density Bento Grid Section */}
+      <section className="relative py-24 z-10 px-6 sm:px-10 max-w-7xl mx-auto border-t border-white/[0.06]">
+        <div className="flex flex-col gap-4 mb-10 text-center max-w-2xl mx-auto">
+          <div className="inline-flex items-center justify-center gap-2 px-3.5 py-1 rounded-full bg-indigo-500/10 border border-indigo-400/20 text-xs text-indigo-400 font-bold uppercase tracking-wider font-mono-data w-max mx-auto">
+            <Layers className="w-4 h-4" /> INTEGRATED SURVEILLANCE MODULES
+          </div>
+          <h2 className="text-3xl sm:text-4xl font-bold font-mono-data text-white">CAPABILITY MATRIX</h2>
+          <p className="text-xs sm:text-sm text-slate-300 font-sans">Enterprise-grade AI detection modules running in unified parallelism.</p>
+        </div>
+        <BentoGrid />
+      </section>
+
+      {/* Feature 2: Biometric Facial ReID & Identity Scanner */}
+      <section className="relative py-24 z-10 px-6 sm:px-10 max-w-7xl mx-auto border-t border-white/[0.06]">
+        <div className="w-full grid grid-cols-1 lg:grid-cols-2 gap-16 items-center">
+          
+          <motion.div
+            initial="hidden"
+            whileInView="visible"
+            viewport={{ once: true, margin: '-20%' }}
+            variants={fStagger}
+            className="flex flex-col gap-6 order-2 lg:order-1"
+          >
+            <motion.div
+              variants={fFadeUp}
+              className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-xs text-indigo-400 font-bold w-max uppercase tracking-wider font-mono-data"
+            >
+              <Fingerprint className="w-4 h-4" /> BIOMETRIC & REID ENGINE
+            </motion.div>
+
+            <motion.h2 variants={fFadeUp} className="text-3xl sm:text-4xl font-bold font-mono-data leading-tight text-white">
+              PERSISTENT CROSS-CAM <br />
+              <span className="text-gradient">IDENTITY MATCHING</span>
+            </motion.h2>
+
+            <motion.p variants={fFadeUp} className="text-slate-300 leading-relaxed text-sm sm:text-base font-sans">
+              Identify known vs unregistered individuals across multi-camera subnets. Deep 128-d facial feature embeddings enable zero-collision matching even under heavy shadows or low resolution.
+            </motion.p>
+
+            <motion.div variants={fFadeUp} className="grid grid-cols-2 gap-4 mt-2">
+              <div className="p-4 rounded-xl glass-card border border-white/[0.06]">
+                <p className="text-lg font-bold text-indigo-400 font-mono-data">128-D MESH</p>
+                <p className="text-xs text-slate-400 mt-1">Landmark Feature Extraction</p>
+              </div>
+              <div className="p-4 rounded-xl glass-card border border-white/[0.06]">
+                <p className="text-lg font-bold text-emerald-400 font-mono-data">REID GRAPH</p>
+                <p className="text-xs text-slate-400 mt-1">Multi-Camera Trajectory Sync</p>
+              </div>
+            </motion.div>
+          </motion.div>
+
+          <div className="relative rounded-2xl overflow-hidden glass-panel p-2 border border-indigo-500/30 shadow-2xl group order-1 lg:order-2">
+            <Image
+              src="/images/facial_reid_3d.png"
+              alt="3D Biometric Facial Scanner & ReID HUD"
+              width={700}
+              height={440}
+              className="rounded-xl object-cover w-full group-hover:scale-105 transition-transform duration-700"
+            />
+            <div className="absolute bottom-4 right-4 px-3 py-1.5 rounded-lg bg-slate-900/90 border border-indigo-400/40 text-xs font-bold text-indigo-300 font-mono-data flex items-center gap-2">
+              <Users className="w-4 h-4 text-indigo-400" />
+              <span>FACIAL LANDMARK MATCH ACTIVE</span>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      {/* Feature 3: Instant Weapon & Threat Alerts */}
+      <section className="relative py-24 z-10 px-6 sm:px-10 max-w-7xl mx-auto border-t border-white/[0.06]">
+        <div className="w-full grid grid-cols-1 lg:grid-cols-2 gap-16 items-center">
+          
+          <div className="relative rounded-2xl overflow-hidden glass-panel p-2 border border-red-500/40 shadow-2xl group">
+            <Image
+              src="/images/threat_detection_3d.png"
+              alt="Instant Weapon & Threat Detection Red Vignette HUD"
+              width={700}
+              height={440}
+              className="rounded-xl object-cover w-full group-hover:scale-105 transition-transform duration-700"
+            />
+            <div className="absolute top-4 left-4 px-3 py-1.5 rounded-lg bg-red-950/90 border border-red-500 text-xs font-bold text-red-300 font-mono-data flex items-center gap-2 animate-pulse">
+              <Siren className="w-4 h-4 text-red-400" />
+              <span>INSTANT THREAT VIGNETTE FLASH [0.5MS]</span>
+            </div>
+          </div>
+
+          <motion.div
+            initial="hidden"
+            whileInView="visible"
+            viewport={{ once: true, margin: '-20%' }}
+            variants={fStagger}
+            className="flex flex-col gap-6"
+          >
+            <motion.div
+              variants={fFadeUp}
+              className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-red-500/10 border border-red-500/20 text-xs text-red-400 font-bold w-max uppercase tracking-wider font-mono-data"
+            >
+              <ShieldAlert className="w-4 h-4" /> ZERO-LATENCY THREAT RESPONSE
+            </motion.div>
+
+            <motion.h2 variants={fFadeUp} className="text-3xl sm:text-4xl font-bold font-mono-data leading-tight text-white">
+              0.5ms WEAPON & FIGHT <br />
+              <span className="text-red-400">INSTANT ALERTS</span>
+            </motion.h2>
+
+            <motion.p variants={fFadeUp} className="text-slate-300 leading-relaxed text-sm sm:text-base font-sans">
+              Detect weapons, firearms, knives, physical altercations, accidents, and break-ins in real-time. Immediate red screen vignette flashes alert command center operators the moment a weapon is visible in frame.
+            </motion.p>
+
+            <motion.div variants={fFadeUp} className="grid grid-cols-2 gap-4 mt-2">
+              <div className="p-4 rounded-xl glass-card border border-red-500/30 bg-red-950/20">
+                <p className="text-lg font-bold text-red-400 font-mono-data">RED VIGNETTE</p>
+                <p className="text-xs text-slate-400 mt-1">Full-screen visual alert blink</p>
+              </div>
+              <div className="p-4 rounded-xl glass-card border border-red-500/30 bg-red-950/20">
+                <p className="text-lg font-bold text-red-400 font-mono-data">SHADOW PICKUP</p>
+                <p className="text-xs text-slate-400 mt-1">High sensitivity weapon recognition</p>
+              </div>
+            </motion.div>
+          </motion.div>
+
+        </div>
+      </section>
+
+      {/* Feature 4: Interactive AI Stream Demo */}
+      <section className="relative py-24 z-10 px-6 sm:px-10 max-w-7xl mx-auto border-t border-white/[0.06]">
+        <div className="w-full grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
+          
+          <motion.div
+            initial="hidden"
+            whileInView="visible"
+            viewport={{ once: true, margin: '-20%' }}
+            variants={fStagger}
+            className="lg:col-span-5 flex flex-col gap-6"
+          >
+            <motion.div
+              variants={fFadeUp}
+              className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-400 font-bold w-max uppercase tracking-wider font-mono-data"
+            >
+              <Activity className="w-4 h-4" /> LIVE NEURAL INFERENCE ENGINE
+            </motion.div>
+
+            <motion.h2 variants={fFadeUp} className="text-3xl sm:text-4xl font-bold font-mono-data leading-tight text-white">
+              INTERACTIVE AI <br />
+              <span className="text-emerald-400">STREAM TRACKER</span>
+            </motion.h2>
+
+            <motion.p variants={fFadeUp} className="text-slate-300 leading-relaxed text-sm sm:text-base font-sans">
+              Experience the live edge pipeline in action. Multi-class object classification, real-time confidence scores, and sub-50ms bounding box tracking rendered directly on stream frames.
+            </motion.p>
+
+            <motion.div variants={fFadeUp} className="flex items-center gap-4">
+              <div className="flex items-center gap-2 text-xs font-bold text-emerald-400 font-mono-data">
+                <CheckCircle2 className="w-4 h-4" /> SUB-50MS LATENCY
+              </div>
+              <div className="flex items-center gap-2 text-xs font-bold text-sky-400 font-mono-data">
+                <CheckCircle2 className="w-4 h-4" /> RTSP ACCELERATED
+              </div>
+            </motion.div>
+          </motion.div>
+
+          <div className="lg:col-span-7 w-full">
+            <AIVideoDemo />
+          </div>
+
+        </div>
+      </section>
+
+      {/* Call To Action Console */}
+      <section className="relative py-28 z-10 px-6 sm:px-10 max-w-7xl mx-auto justify-center text-center border-t border-white/[0.06]">
+        <motion.div
+          initial="hidden"
+          whileInView="visible"
+          viewport={{ once: true, margin: '-15%' }}
+          variants={fStagger}
+          className="max-w-2xl flex flex-col gap-8 items-center mx-auto"
+        >
+          <motion.div
+            variants={fFadeUp}
+            className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-sky-500/10 border border-sky-500/20 text-xs text-sky-400 font-bold uppercase tracking-wider font-mono-data"
+          >
+            <Activity className="w-4 h-4" /> ALL SYSTEMS OPERATIONAL
+          </motion.div>
+
+          <motion.h2 variants={fFadeUp} className="text-4xl sm:text-5xl font-extrabold font-mono-data text-white leading-tight">
+            DEPLOY MADAD VISION <br />
+            <span className="text-gradient">IN YOUR NETWORK</span>
+          </motion.h2>
+
+          <motion.p variants={fFadeUp} className="text-slate-300 leading-relaxed text-sm sm:text-base font-sans">
+            Connect existing RTSP camera streams instantly and experience real-time neural surveillance, traffic boundary analysis, and automated threat dispatching.
+          </motion.p>
+
+          <motion.div variants={fFadeUp} className="flex flex-wrap items-center justify-center gap-4">
+            <Link
+              href="/register"
+              className="group px-8 py-4 rounded-xl bg-gradient-to-r from-sky-400 to-indigo-600 text-white font-bold text-xs sm:text-sm flex items-center gap-3 transition-all duration-300 hover:scale-105 shadow-xl shadow-sky-500/25 font-mono-data"
+            >
+              <span>CREATE OPERATOR ACCOUNT</span>
+              <ArrowRight className="w-4.5 h-4.5" />
+            </Link>
+          </motion.div>
+        </motion.div>
       </section>
 
       {/* Footer */}
-      <footer className="py-12 border-t border-slate-800/60 bg-[#020617] text-center text-slate-500">
-        <div className="flex items-center justify-center gap-2 mb-4">
-          <Shield className="w-5 h-5 text-slate-600" />
-          <span className="font-bold text-slate-400 tracking-tight">Madad Vision AI</span>
+      <footer className="relative z-10 py-10 border-t border-white/10 bg-[#050814]">
+        <div className="max-w-7xl mx-auto px-6 sm:px-10 flex flex-col sm:flex-row justify-between items-center gap-4 text-xs text-slate-400 font-mono-data">
+          <p>© {new Date().getFullYear()} MADAD VISION AI. ALL RIGHTS RESERVED.</p>
+          <div className="flex gap-6">
+            <Link href="/about" className="hover:text-sky-400 transition-colors">ABOUT</Link>
+            <Link href="/contact" className="hover:text-sky-400 transition-colors">CONTACT</Link>
+            <Link href="/login" className="hover:text-sky-400 transition-colors">CONSOLE LOGIN</Link>
+          </div>
         </div>
-        <p className="text-sm">© {new Date().getFullYear()} Madad Vision AI. All rights reserved.</p>
       </footer>
     </div>
   );

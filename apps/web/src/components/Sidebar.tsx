@@ -139,6 +139,7 @@ export default function Sidebar() {
       <nav className="flex-1 px-2 py-4 space-y-0.5 overflow-y-auto">
         {visibleItems.map((item) => {
           const isActive = pathname === item.href || (item.href !== '/' && pathname.startsWith(item.href));
+          const Icon = item.icon as React.ComponentType<{ className?: string }>;
           return (
             <Link
               key={item.href}
@@ -152,7 +153,7 @@ export default function Sidebar() {
               )}
               title={collapsed ? item.name : undefined}
             >
-              <item.icon className={cn(
+              <Icon className={cn(
                 'flex-shrink-0 transition-colors',
                 collapsed ? 'w-5 h-5' : 'w-4.5 h-4.5',
                 isActive ? 'text-blue-400' : 'text-slate-500 group-hover:text-slate-300'
