@@ -21,13 +21,9 @@ export function getSocket(token?: string): Socket {
     }
   }
 
-  if (_socket && _socket.connected) return _socket;
+  if (_socket) return _socket;
 
   const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:3001';
-
-  if (_socket) {
-    _socket.disconnect();
-  }
 
   _socket = io(WS_URL, {
     path: '/socket.io',
