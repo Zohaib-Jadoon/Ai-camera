@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   Settings, Maximize2,
   ShieldAlert, Info, WifiOff, Volume2, VolumeX,
@@ -43,13 +44,18 @@ function CameraFeed({
   isOnline: boolean;
   refreshTrigger: number;
   isZoomed: boolean;
-  onFrameUpdate?: (dataUrl: string) => void;
+  onFrameUpdate?: (cameraId: string, dataUrl: string) => void;
 }) {
   const [frameSrc, setFrameSrc] = useState<string | null>(null);
   const [hasFrame, setHasFrame] = useState(false);
   const [fps, setFps] = useState<number>(0);
   const frameCountRef = useRef<number>(0);
   const lastFpsCalcRef = useRef<number>(Date.now());
+  const onFrameUpdateRef = useRef(onFrameUpdate);
+
+  useEffect(() => {
+    onFrameUpdateRef.current = onFrameUpdate;
+  }, [onFrameUpdate]);
 
   useEffect(() => {
     if (!isOnline) {
@@ -75,7 +81,9 @@ function CameraFeed({
       const dataUrl = `data:image/jpeg;base64,${payload.data}`;
       setFrameSrc(dataUrl);
       setHasFrame(true);
-      if (onFrameUpdate) onFrameUpdate(dataUrl);
+      if (onFrameUpdateRef.current) {
+        onFrameUpdateRef.current(cameraId, dataUrl);
+      }
 
       // Calculate live FPS
       frameCountRef.current += 1;
@@ -94,7 +102,7 @@ function CameraFeed({
       socket.off('frame', onFrame);
       socket.emit('leave-camera', cameraId);
     };
-  }, [cameraId, isOnline, refreshTrigger, onFrameUpdate]);
+  }, [cameraId, isOnline, refreshTrigger]);
 
   if (!isOnline) {
     return (
@@ -148,6 +156,7 @@ function CameraFeed({
 }
 
 export default function LiveMonitoring() {
+  const router = useRouter();
   const [layout, setLayout] = useState<'2x2' | '3x2' | '1+3'>('2x2');
   const [selectedCam, setSelectedCam] = useState<string | null>(null);
   const [muted, setMuted] = useState(true);
@@ -156,6 +165,10 @@ export default function LiveMonitoring() {
   const [showEventSidebar, setShowEventSidebar] = useState(true);
   const [lastFrameData, setLastFrameData] = useState<Record<string, string>>({});
   const qc = useQueryClient();
+
+  const handleFrameUpdate = useCallback((camId: string, dataUrl: string) => {
+    setLastFrameData(prev => ({ ...prev, [camId]: dataUrl }));
+  }, []);
 
   // Real-time camera status updates via WebSocket
   useEffect(() => {
@@ -183,7 +196,9 @@ export default function LiveMonitoring() {
   };
 
   const detectionsByCam = events.reduce<Record<string, number>>((acc, ev) => {
-    acc[ev.camera_id] = (acc[ev.camera_id] ?? 0) + 1;
+    if (ev.camera_id) {
+      acc[ev.camera_id] = (acc[ev.camera_id] ?? 0) + 1;
+    }
     return acc;
   }, {});
 
@@ -220,11 +235,6 @@ export default function LiveMonitoring() {
     a.href = dataUrl;
     a.download = `snapshot-${camName.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.jpg`;
     a.click();
-  };
-
-  const handleSettings = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    window.location.href = '/cameras';
   };
 
   return (
@@ -305,6 +315,12 @@ export default function LiveMonitoring() {
                 Add IP or RTSP camera endpoints in the Cameras section to launch real-time AI computer vision monitoring.
               </p>
             </div>
+            <button
+              onClick={() => router.push('/cameras')}
+              className="mt-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs rounded-xl shadow-lg transition-colors"
+            >
+              Add Camera
+            </button>
           </div>
         ) : (
           <div className={cn('flex-1 grid gap-4 transition-all duration-300 overflow-y-auto pr-1 scrollbar-hide auto-rows-max', gridClass[layout])}>
@@ -334,7 +350,7 @@ export default function LiveMonitoring() {
                         isOnline={isOnline}
                         refreshTrigger={refreshTriggers[cam.id] ?? 0}
                         isZoomed={!!zoomedCams[cam.id]}
-                        onFrameUpdate={(dataUrl) => setLastFrameData(prev => ({ ...prev, [cam.id]: dataUrl }))}
+                        onFrameUpdate={handleFrameUpdate}
                       />
                     </div>
 
@@ -438,7 +454,7 @@ export default function LiveMonitoring() {
               ) : (
                 events.map((ev) => {
                   const colorClass = TYPE_COLORS[ev.object_type] ?? 'text-slate-400 bg-slate-800/50 border-slate-700';
-                  const camName = ev.camera?.name ?? ev.camera_id.slice(0, 8);
+                  const camName = ev.camera?.name ?? ev.camera_id?.slice(0, 8) ?? 'Unknown';
                   const ts = new Date(ev.timestamp).toLocaleTimeString();
                   return (
                     <motion.div
@@ -458,7 +474,7 @@ export default function LiveMonitoring() {
                         <div className="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden">
                           <div className="h-full bg-blue-500 rounded-full shadow-[0_0_8px_rgba(59,130,246,0.8)]" style={{ width: `${Math.min(100, (ev.confidence ?? 0.8) * 100)}%` }} />
                         </div>
-                        <span className="text-[10px] text-blue-400 font-mono font-extrabold">{( (ev.confidence ?? 0.8) * 100 ).toFixed(0)}%</span>
+                        <span className="text-[10px] text-blue-400 font-mono font-extrabold">{((ev.confidence ?? 0.8) * 100).toFixed(0)}%</span>
                       </div>
                     </motion.div>
                   );
