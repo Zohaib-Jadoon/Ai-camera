@@ -105,14 +105,17 @@ class StreamHandler:
 
             for url in candidates:
                 logger.info(f"Trying RTSP URL: {url}")
-                # 3s timeout — short enough to try all candidates before the
-                # Socket.IO ping interval (25s) fires.
+                # Force TCP transport — eliminates UDP packet loss / H264 decode
+                # errors that occur on WiFi. Must be set before VideoCapture().
+                import os as _os
+                _os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+                # 5s timeout — TCP handshake takes slightly longer than UDP
                 cap = cv2.VideoCapture(
                     url,
                     cv2.CAP_FFMPEG,
                     [
-                        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3_000,
-                        cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3_000,
+                        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5_000,
+                        cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5_000,
                     ],
                 )
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

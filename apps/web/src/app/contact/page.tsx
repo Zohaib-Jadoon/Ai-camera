@@ -1,132 +1,136 @@
 'use client';
 
 import { motion } from 'framer-motion';
-import { Mail, MapPin, Phone, ArrowRight, Shield } from 'lucide-react';
 import MarketingNav from '@/components/MarketingNav';
-import { useState } from 'react';
+import BackgroundParticles from '@/components/BackgroundParticles';
+import { Send, MapPin, Phone, Mail } from 'lucide-react';
 
-export default function ContactPage() {
-  const [loading, setLoading] = useState(false);
+const fFadeUp = {
+  hidden: { opacity: 0, y: 20 },
+  visible: { opacity: 1, y: 0, transition: { duration: 0.7, ease: [0.16, 1, 0.3, 1] as const } }
+};
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    await new Promise(r => setTimeout(r, 1000));
-    setLoading(false);
-    alert('Thank you for contacting us. Our sales team will be in touch shortly.');
-  };
 
+const fStagger = {
+  visible: { transition: { staggerChildren: 0.1 } }
+};
+
+export default function Contact() {
   return (
-    <div className="min-h-screen bg-[#020617] text-slate-200 font-sans">
+    <div className="relative min-h-screen bg-[#03050a] text-slate-100 selection:bg-[#7eb8f7]/20 selection:text-[#7eb8f7] overflow-x-hidden">
+      <BackgroundParticles />
       <MarketingNav />
 
-      <section className="relative pt-32 pb-20 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto">
-        <div className="absolute top-1/3 left-0 w-[400px] h-[400px] bg-blue-600/10 rounded-full blur-[120px] pointer-events-none" />
-        
-        <div className="text-center mb-16">
-          <motion.h1 
-            initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} 
-            className="text-4xl md:text-5xl font-bold text-white mb-4"
+      <section className="relative pt-32 pb-24 z-10 px-6 sm:px-10 max-w-7xl mx-auto flex flex-col items-center">
+        <motion.div
+          initial="hidden"
+          animate="visible"
+          variants={fStagger}
+          className="max-w-3xl flex flex-col gap-6 text-center mb-16"
+        >
+          <motion.h1
+            variants={fFadeUp}
+            className="text-4xl sm:text-5xl font-bold tracking-tight font-mono-data"
           >
-            Get in Touch
+            connect with our <span className="text-gradient">engineering team</span>
           </motion.h1>
-          <motion.p 
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 }}
-            className="text-lg text-slate-400 max-w-2xl mx-auto"
+
+          <motion.p
+            variants={fFadeUp}
+            className="text-slate-400 text-base max-w-xl mx-auto leading-relaxed"
           >
-            Ready to upgrade your physical security? Contact our enterprise sales team to schedule a demo and technical consultation.
+            Have technical questions about edge deployment, camera integration protocols, or customized AI model training? Let's talk.
           </motion.p>
-        </div>
+        </motion.div>
 
-        <div className="grid lg:grid-cols-2 gap-12 items-start">
-          {/* Contact Form */}
-          <motion.div 
-            initial={{ opacity: 0, x: -30 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.2 }}
-            className="glass-card p-8 rounded-2xl border border-slate-800/80"
+        <div className="w-full grid grid-cols-1 md:grid-cols-2 gap-12 items-start max-w-5xl">
+          {/* Contact Details */}
+          <motion.div
+            initial={{ opacity: 0, x: -30 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] as const }}
+            className="flex flex-col gap-8"
           >
-            <h2 className="text-2xl font-semibold text-white mb-6">Send us a message</h2>
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1.5">First Name</label>
-                  <input type="text" required className="w-full bg-slate-900/60 border border-slate-700/60 rounded-lg px-4 py-2.5 text-sm text-white focus:outline-none focus:border-blue-500/70 focus:bg-slate-900 transition-all" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1.5">Last Name</label>
-                  <input type="text" required className="w-full bg-slate-900/60 border border-slate-700/60 rounded-lg px-4 py-2.5 text-sm text-white focus:outline-none focus:border-blue-500/70 focus:bg-slate-900 transition-all" />
-                </div>
+            <div className="flex gap-4 items-start">
+              <div className="p-3 rounded-lg bg-[#7eb8f7]/5 border border-[#7eb8f7]/10 text-[#7eb8f7]">
+                <MapPin className="w-5 h-5" />
               </div>
-              
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1.5">Company Email</label>
-                <input type="email" required className="w-full bg-slate-900/60 border border-slate-700/60 rounded-lg px-4 py-2.5 text-sm text-white focus:outline-none focus:border-blue-500/70 focus:bg-slate-900 transition-all" />
+                <h4 className="text-sm font-bold text-slate-300 font-mono-data lowercase">headquarters</h4>
+                <p className="text-sm text-slate-400 mt-1 leading-relaxed">
+                  Surveillance Technology Park, Suite 402<br />
+                  Silicon Valley, CA 94025
+                </p>
               </div>
+            </div>
 
+            <div className="flex gap-4 items-start">
+              <div className="p-3 rounded-lg bg-[#7eb8f7]/5 border border-[#7eb8f7]/10 text-[#7eb8f7]">
+                <Mail className="w-5 h-5" />
+              </div>
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1.5">How can we help you?</label>
-                <textarea rows={4} required className="w-full bg-slate-900/60 border border-slate-700/60 rounded-lg px-4 py-2.5 text-sm text-white focus:outline-none focus:border-blue-500/70 focus:bg-slate-900 transition-all" />
+                <h4 className="text-sm font-bold text-slate-300 font-mono-data lowercase">email support</h4>
+                <p className="text-sm text-slate-400 mt-1 font-mono-data">
+                  engineering@madadvision.ai
+                </p>
               </div>
+            </div>
 
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-900 text-white font-semibold py-3 rounded-lg text-sm transition-all mt-4"
-              >
-                {loading ? (
-                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                ) : (
-                  <>Submit Request <ArrowRight className="w-4 h-4" /></>
-                )}
-              </button>
-            </form>
+            <div className="flex gap-4 items-start">
+              <div className="p-3 rounded-lg bg-[#7eb8f7]/5 border border-[#7eb8f7]/10 text-[#7eb8f7]">
+                <Phone className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-sm font-bold text-slate-300 font-mono-data lowercase">direct phone</h4>
+                <p className="text-sm text-slate-400 mt-1 font-mono-data">
+                  +1 (555) 304-2024
+                </p>
+              </div>
+            </div>
           </motion.div>
 
-          {/* Contact Info */}
-          <motion.div 
-            initial={{ opacity: 0, x: 30 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.3 }}
-            className="space-y-8 lg:pl-8"
+          {/* Contact Form */}
+          <motion.form
+            initial={{ opacity: 0, x: 30 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] as const }}
+            onSubmit={(e) => e.preventDefault()}
+            className="p-8 rounded-2xl glass flex flex-col gap-5 w-full"
           >
             <div>
-              <h3 className="text-xl font-semibold text-white mb-6">Contact Information</h3>
-              <div className="space-y-6">
-                <div className="flex items-start gap-4">
-                  <div className="w-10 h-10 rounded-lg bg-blue-500/10 flex items-center justify-center shrink-0">
-                    <Mail className="w-5 h-5 text-blue-400" />
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-medium text-slate-300">Sales Inquiries</h4>
-                    <p className="text-slate-500">sales@madadvision.ai</p>
-                  </div>
-                </div>
-                <div className="flex items-start gap-4">
-                  <div className="w-10 h-10 rounded-lg bg-blue-500/10 flex items-center justify-center shrink-0">
-                    <Phone className="w-5 h-5 text-blue-400" />
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-medium text-slate-300">Global Support</h4>
-                    <p className="text-slate-500">+1 (800) 555-0199</p>
-                  </div>
-                </div>
-                <div className="flex items-start gap-4">
-                  <div className="w-10 h-10 rounded-lg bg-blue-500/10 flex items-center justify-center shrink-0">
-                    <MapPin className="w-5 h-5 text-blue-400" />
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-medium text-slate-300">Headquarters</h4>
-                    <p className="text-slate-500">100 Innovation Drive<br/>San Francisco, CA 94103</p>
-                  </div>
-                </div>
-              </div>
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 font-mono-data">full name</label>
+              <input
+                type="text"
+                placeholder="John Doe"
+                className="w-full bg-[#03050a]/40 border border-white/[0.04] focus:border-[#7eb8f7]/30 rounded-lg px-4 py-2.5 text-sm text-slate-200 focus:outline-none transition-colors"
+              />
             </div>
 
-            <div className="glass-panel p-6 rounded-2xl border border-blue-500/20 bg-blue-500/5">
-              <div className="flex items-center gap-3 mb-2">
-                <Shield className="w-5 h-5 text-blue-400" />
-                <h4 className="font-semibold text-white">Enterprise SLA</h4>
-              </div>
-              <p className="text-sm text-slate-400">Our enterprise clients receive 24/7 priority support with a guaranteed 1-hour response time for critical incidents.</p>
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 font-mono-data">email address</label>
+              <input
+                type="email"
+                placeholder="john@company.com"
+                className="w-full bg-[#03050a]/40 border border-white/[0.04] focus:border-[#7eb8f7]/30 rounded-lg px-4 py-2.5 text-sm text-slate-200 focus:outline-none transition-colors font-mono-data"
+              />
             </div>
-          </motion.div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 font-mono-data">message</label>
+              <textarea
+                rows={4}
+                placeholder="Describe your CCTV network scale..."
+                className="w-full bg-[#03050a]/40 border border-white/[0.04] focus:border-[#7eb8f7]/30 rounded-lg px-4 py-2.5 text-sm text-slate-200 focus:outline-none transition-colors resize-none"
+              />
+            </div>
+
+            <button
+              type="submit"
+              className="mt-2 w-full py-3 rounded-lg bg-[#7eb8f7] hover:bg-[#4a9fe0] text-[#03050a] font-bold flex items-center justify-center gap-2 transition-all shadow-[0_0_20px_rgba(126,184,247,0.15)]"
+            >
+              Send Message <Send className="w-4 h-4" />
+            </button>
+          </motion.form>
         </div>
       </section>
     </div>

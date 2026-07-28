@@ -1,74 +1,103 @@
 'use client';
 
+import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { Target, Users, Zap, ShieldCheck } from 'lucide-react';
 import MarketingNav from '@/components/MarketingNav';
+import BackgroundParticles from '@/components/BackgroundParticles';
+import { Shield, Eye, ShieldAlert, Cpu } from 'lucide-react';
 
-export default function AboutPage() {
-  const containerVariants = {
-    hidden: { opacity: 0 },
-    visible: { opacity: 1, transition: { staggerChildren: 0.1 } }
-  };
+const fFadeUp = {
+  hidden: { opacity: 0, y: 20 },
+  visible: { opacity: 1, y: 0, transition: { duration: 0.7, ease: [0.16, 1, 0.3, 1] as const } }
+};
 
-  const itemVariants = {
-    hidden: { opacity: 0, y: 20 },
-    visible: { opacity: 1, y: 0, transition: { duration: 0.5, ease: 'easeOut' as const } }
-  };
+const fStagger = {
+  visible: { transition: { staggerChildren: 0.1 } }
+};
 
+
+export default function About() {
   return (
-    <div className="min-h-screen bg-[#020617] text-slate-200 font-sans">
+    <div className="relative min-h-screen bg-[#03050a] text-slate-100 selection:bg-[#7eb8f7]/20 selection:text-[#7eb8f7] overflow-x-hidden">
+      <BackgroundParticles />
       <MarketingNav />
 
-      {/* Hero Section */}
-      <section className="relative pt-32 pb-20 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto flex flex-col items-center text-center">
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-blue-600/10 rounded-full blur-[120px] pointer-events-none" />
+      <section className="relative pt-32 pb-24 z-10 px-6 sm:px-10 max-w-7xl mx-auto flex flex-col items-center">
+        <motion.div
+          initial="hidden"
+          animate="visible"
+          variants={fStagger}
+          className="max-w-3xl flex flex-col gap-8 text-center"
+        >
+          <motion.div
+            variants={fFadeUp}
+            className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#7eb8f7]/5 border border-[#7eb8f7]/15 text-xs text-[#7eb8f7] font-semibold w-max uppercase tracking-wider font-mono-data mx-auto"
+          >
+            <Shield className="w-3.5 h-3.5" /> platform intelligence
+          </motion.div>
 
-        <motion.div variants={containerVariants} initial="hidden" animate="visible" className="relative z-10 max-w-3xl mx-auto">
-          <motion.h1 variants={itemVariants} className="text-4xl md:text-6xl font-bold tracking-tight mb-6 text-white">
-            About <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-500">Madad Vision</span>
+          <motion.h1
+            variants={fFadeUp}
+            className="text-4xl sm:text-5xl font-bold tracking-tight font-mono-data"
+          >
+            modular surveillance <br />
+            <span className="text-gradient">engineered for accuracy</span>
           </motion.h1>
-          <motion.p variants={itemVariants} className="text-lg md:text-xl text-slate-400 mb-10 leading-relaxed">
-            We are revolutionizing the physical security industry by bringing state-of-the-art computer vision models directly to existing CCTV infrastructure, enabling proactive threat response instead of reactive video forensics.
+
+          <motion.p
+            variants={fFadeUp}
+            className="text-slate-400 text-base sm:text-lg leading-relaxed"
+          >
+            Madad Vision is built on a distributed Edge-to-Cloud architecture. Our python processing nodes run lightweight YOLO models directly at the camera subnet, ensuring zero network latency and perfect data privacy.
           </motion.p>
         </motion.div>
-      </section>
 
-      {/* Values Section */}
-      <section className="py-16 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto">
-        <div className="grid md:grid-cols-2 gap-8">
-          {[
-            { icon: Target, title: 'Our Mission', text: 'To democratize advanced AI security, making enterprise-grade surveillance capabilities accessible without requiring expensive proprietary hardware upgrades.' },
-            { icon: Zap, title: 'Real-Time Edge Processing', text: 'We believe security decisions must happen in milliseconds. Our optimized pipeline ensures detections and alerts are delivered instantaneously.' },
-            { icon: ShieldCheck, title: 'Privacy by Design', text: 'We strictly adhere to data privacy standards. All video processing happens locally or in your secure cloud enclave, and biometric data is strongly encrypted.' },
-            { icon: Users, title: 'For Security Operators', text: 'We design our interfaces for the people who use them every day—minimizing cognitive load and alert fatigue so operators can focus on real threats.' }
-          ].map((item, idx) => (
-            <motion.div 
-              key={idx}
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true }}
-              transition={{ delay: idx * 0.1 }}
-              className="glass-card p-8 rounded-2xl border border-slate-800/60 flex flex-col items-start gap-4"
-            >
-              <div className="w-12 h-12 rounded-xl bg-blue-500/10 flex items-center justify-center">
-                <item.icon className="w-6 h-6 text-blue-400" />
-              </div>
-              <h3 className="text-2xl font-semibold text-white">{item.title}</h3>
-              <p className="text-slate-400 leading-relaxed">{item.text}</p>
-            </motion.div>
-          ))}
-        </div>
-      </section>
+        <motion.div
+          initial="hidden"
+          whileInView="visible"
+          viewport={{ once: true, margin: '-10%' }}
+          variants={fStagger}
+          className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full mt-16"
+        >
+          <motion.div variants={fFadeUp} className="p-6 rounded-2xl glass glass-hover">
+            <Cpu className="w-8 h-8 text-[#7eb8f7] mb-4" />
+            <h3 className="text-lg font-bold mb-2 font-mono-data lowercase">edge computing</h3>
+            <p className="text-sm text-slate-400 leading-relaxed">
+              Inference is run directly on localized devices. Original RTSP feeds never leave your secure firewall.
+            </p>
+          </motion.div>
 
-      {/* Team / Closing */}
-      <section className="py-20 text-center px-4">
-        <div className="max-w-2xl mx-auto glass-card p-10 rounded-3xl border border-blue-500/20 relative overflow-hidden">
-          <div className="absolute inset-0 bg-blue-500/5" />
-          <h2 className="text-3xl font-bold text-white mb-4 relative z-10">Join the Future of Security</h2>
-          <p className="text-slate-400 mb-8 relative z-10">
-            Backed by leading researchers in computer vision and artificial intelligence, Madad Vision is constantly pushing the boundaries of what's possible in automated surveillance.
-          </p>
-        </div>
+          <motion.div variants={fFadeUp} className="p-6 rounded-2xl glass glass-hover">
+            <Eye className="w-8 h-8 text-[#7eb8f7] mb-4" />
+            <h3 className="text-lg font-bold mb-2 font-mono-data lowercase">centroid tracker</h3>
+            <p className="text-sm text-slate-400 leading-relaxed">
+              High-accuracy bounding box projection maintains tracking integrity during camera switches or temporary blocks.
+            </p>
+          </motion.div>
+
+          <motion.div variants={fFadeUp} className="p-6 rounded-2xl glass glass-hover">
+            <ShieldAlert className="w-8 h-8 text-[#7eb8f7] mb-4" />
+            <h3 className="text-lg font-bold mb-2 font-mono-data lowercase">intrusion rules</h3>
+            <p className="text-sm text-slate-400 leading-relaxed">
+              Define polygons of any shape and construct complex logic gates to eliminate common wind and animal triggers.
+            </p>
+          </motion.div>
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0 }}
+          whileInView={{ opacity: 1 }}
+          viewport={{ once: true }}
+          transition={{ duration: 1, delay: 0.2 }}
+          className="mt-16 text-center"
+        >
+          <Link
+            href="/login"
+            className="inline-flex items-center gap-2 px-6 py-3 rounded-lg bg-[#7eb8f7] hover:bg-[#4a9fe0] text-[#03050a] font-semibold transition-all shadow-[0_0_24px_rgba(126,184,247,0.25)]"
+          >
+            Launch Console
+          </Link>
+        </motion.div>
       </section>
     </div>
   );

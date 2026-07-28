@@ -131,13 +131,29 @@ async def on_sync_cameras(cameras):
                     del active_streams[old_id]
                 active_intrusion_detectors.pop(old_id, None)
 
-    # Start tasks for cameras not yet running
+    # Start tasks for new cameras; restart tasks when rtsp_url changed
     for camera in cameras:
         cid = camera["id"]
-        if not camera_manager.get(cid):
+        existing = camera_manager.get(cid)
+        new_rtsp = camera.get("rtsp_url", "")
+
+        if existing and existing.rtsp_url != new_rtsp:
+            # URL changed — cancel old task and stream, then respawn
+            logger.info(
+                f"Camera {cid} RTSP URL changed: {existing.rtsp_url!r} → {new_rtsp!r} — restarting task"
+            )
+            camera_manager.remove(cid)
+            if cid in active_streams:
+                active_streams[cid].stop()
+                del active_streams[cid]
+            active_intrusion_detectors.pop(cid, None)
+            existing = None  # fall through to spawn below
+
+        if not existing:
             task = asyncio.create_task(process_camera(camera))
-            camera_manager.register(cid, camera.get("name", cid), camera.get("rtsp_url", ""), task)
+            camera_manager.register(cid, camera.get("name", cid), new_rtsp, task)
             logger.info(f"Spawned task for camera: {camera.get('name', cid)}")
+
 
 
 @sio.on('sync_embeddings')
@@ -468,8 +484,34 @@ async def process_camera(camera: dict):
     last_status: str | None = None  # track last emitted status to avoid spamming
     status_report_interval = 5     # emit status every N seconds (5s for responsive UI)
     last_status_report = 0.0
+    last_frame_emit = 0.0          # wall-clock time of last frame emit
+    _FRAME_INTERVAL = 1.0 / 15    # target 15 FPS for live display
+    last_tracked_for_display: list = []  # latest detections for annotation
 
     loop = asyncio.get_event_loop()
+
+    # Shared JPEG encoder — runs in executor, decoupled from detection loop
+    def _encode_and_emit_frame(f, dets):
+        import base64 as _b64
+        import cv2 as _cv2e
+        annotated = f.copy()
+        for d in dets:
+            bbox = d.get("smooth_box", d.get("box", d.get("bbox")))
+            if bbox and len(bbox) == 4:
+                x1, y1, x2, y2 = [int(v) for v in bbox]
+                label = f"{d.get('object_type', '?')} {d.get('confidence', 0):.0%}"
+                _cv2e.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 80), 2)
+                _cv2e.putText(annotated, label, (x1, max(y1 - 8, 12)),
+                              _cv2e.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 80), 1)
+        # Resize to 854px wide for bandwidth
+        h, w = annotated.shape[:2]
+        if w > 854:
+            scale = 854 / w
+            annotated = _cv2e.resize(annotated, (854, int(h * scale)))
+        ok, buf = _cv2e.imencode('.jpg', annotated, [_cv2e.IMWRITE_JPEG_QUALITY, 55])
+        if not ok:
+            return None
+        return _b64.b64encode(buf).decode('utf-8')
 
     while True:
         try:
@@ -496,6 +538,20 @@ async def process_camera(camera: dict):
                 continue
 
             frame = stream.get_frame()
+
+            # ── Live frame streaming (DECOUPLED from AI pipeline) ─────────
+            # Emit at up to 15 FPS using last known detections for bounding
+            # boxes. NOT blocked by YOLO / face / ReID latency.
+            if (now - last_frame_emit) >= _FRAME_INTERVAL and sio.connected:
+                last_frame_emit = now
+                _f_snap = frame.copy()
+                _d_snap = list(last_tracked_for_display)
+                jpeg_b64 = await loop.run_in_executor(
+                    None, _encode_and_emit_frame, _f_snap, _d_snap
+                )
+                if jpeg_b64:
+                    await sio.emit("frame", {"camera_id": camera_id, "data": jpeg_b64})
+
 
             # ── 🐦 Privacy masks (Frigate): black-out sensitive regions ────────
             # Applied before YOLO and FaceEngine so masked areas are never inferred.
@@ -530,12 +586,25 @@ async def process_camera(camera: dict):
                 await asyncio.sleep(0.05)  # yield, check again in 50ms
                 continue
 
-            # --- Offload CPU-bound inference to thread pool ---
-            # This keeps the asyncio event loop free to handle socket events,
-            # heartbeats, and other camera tasks concurrently.
+            # Rescaling YOLO inference to 640px wide for 3-5x speedup on CPU
+            fh, fw = frame.shape[:2]
+            yolo_w = 640
+            yolo_h = int(fh * (yolo_w / fw))
+            import cv2 as _cv2_yolo
+            resized_frame = _cv2_yolo.resize(frame, (yolo_w, yolo_h))
+
             raw_detections = await loop.run_in_executor(
-                None, detector.detect, frame
+                None, detector.detect, resized_frame
             )
+
+            # Map detections back to original resolution coordinates
+            scale_x = fw / yolo_w
+            scale_y = fh / yolo_h
+            for d in raw_detections:
+                if 'box' in d:
+                    x1, y1, x2, y2 = d['box']
+                    d['box'] = [int(x1 * scale_x), int(y1 * scale_y), int(x2 * scale_x), int(y2 * scale_y)]
+
             tracked = tracker.update(raw_detections)
 
             # ── Frigate Phase-3: stationary motion classification ────────────
@@ -777,42 +846,8 @@ async def process_camera(camera: dict):
             lpr_engine.cleanup(active_track_str)
             reid_engine.cleanup(active_track_str, camera_id)
 
-            # ── Live frame streaming ─────────────────────────────────────────
-            # Emit an annotated JPEG frame every 3rd frame so the web dashboard
-            # can display a live video feed.  We draw bounding boxes first so
-            # the viewer sees the AI detections overlaid on the video.
-            # Throttled to every 3rd frame to cap bandwidth (~10 fps at 30 fps input).
-            if stream.frame_count % 3 == 0 and sio.connected:
-                def _encode_frame(f, dets):
-                    import base64 as _b64
-                    import cv2 as _cv2
-                    annotated = f.copy()
-                    for d in dets:
-                        # Use smooth_box for tracked objects, fallback to box, then bbox
-                        bbox = d.get("smooth_box", d.get("box", d.get("bbox")))
-                        if bbox and len(bbox) == 4:
-                            x1, y1, x2, y2 = [int(v) for v in bbox]
-                            label = f"{d.get('object_type', '?')} {d.get('confidence', 0):.0%}"
-                            _cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 80), 2)
-                            _cv2.putText(annotated, label, (x1, max(y1 - 8, 12)),
-                                        _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 80), 1)
-                    # PERF-5: resize to max 854px wide before encoding to halve payload
-                    h, w = annotated.shape[:2]
-                    if w > 854:
-                        scale = 854 / w
-                        annotated = _cv2.resize(annotated, (854, int(h * scale)))
-                    # Quality 50 keeps good visual quality at ~30KB vs ~80KB at 80
-                    ok, buf = _cv2.imencode('.jpg', annotated, [_cv2.IMWRITE_JPEG_QUALITY, 50])
-                    if not ok:
-                        return None
-                    return _b64.b64encode(buf).decode('utf-8')
-
-                jpeg_b64 = await loop.run_in_executor(None, _encode_frame, frame, tracked)
-                if jpeg_b64:
-                    await sio.emit("frame", {
-                        "camera_id": camera_id,
-                        "data": jpeg_b64,
-                    })
+            # Update tracked detections for early decoupled frame emitter
+            last_tracked_for_display = visible_tracked
 
             consecutive_errors = 0
             await asyncio.sleep(0)  # yield to event loop between frames

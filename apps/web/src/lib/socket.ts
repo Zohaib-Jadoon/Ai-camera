@@ -8,6 +8,19 @@ import { io, Socket } from 'socket.io-client';
 let _socket: Socket | null = null;
 
 export function getSocket(token?: string): Socket {
+  let activeToken = token;
+  if (!activeToken && typeof window !== 'undefined') {
+    try {
+      const raw = localStorage.getItem('auth-storage');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        activeToken = parsed?.state?.token;
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }
+
   if (_socket && _socket.connected) return _socket;
 
   const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:3001';
@@ -18,7 +31,7 @@ export function getSocket(token?: string): Socket {
 
   _socket = io(WS_URL, {
     path: '/socket.io',
-    auth: token ? { token: `Bearer ${token}` } : undefined,
+    auth: activeToken ? { token: `Bearer ${activeToken}` } : undefined,
     transports: ['websocket'],
     reconnection: true,
     reconnectionAttempts: Infinity,

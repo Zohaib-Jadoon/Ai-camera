@@ -1,34 +1,18 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
-import "../globals.css";
-import Sidebar from "@/components/Sidebar";
-import Header from "@/components/Header";
-import AlertToast from "@/components/AlertToast";
-import AlertSound from "@/components/alert-sound";
-
-const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Madad Vision AI — Dashboard",
-  description: "AI-Powered Smart CCTV Surveillance Platform",
+  title: "Dashboard — Madad Vision AI",
+  description: "Enterprise Security Control Room.",
 };
 
-export default function DashboardLayout({
+export default function DashboardRootLayout({
   children,
-}: {
+}: Readonly<{
   children: React.ReactNode;
-}) {
+}>) {
   return (
-    <div className={`${inter.className} h-full flex bg-[#020817]`}>
-      <Sidebar />
-      <div className="flex-1 flex flex-col min-h-screen overflow-hidden">
-        <Header />
-        <main className="flex-1 overflow-y-auto p-6 lg:p-8">
-          {children}
-        </main>
-      </div>
-      <AlertToast />
-      <AlertSound />
+    <div className="min-h-screen bg-[#03050a] text-slate-100 flex flex-col md:flex-row" style={{ fontFamily: "'Outfit', system-ui, sans-serif" }}>
+      {children}
     </div>
   );
 }

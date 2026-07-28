@@ -71,15 +71,21 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
     // Allow AI Engine internal service if key matches
     if (!token) {
       const engineKey = client.handshake.headers['x-ai-engine-key'] || client.handshake.auth?.['x-ai-engine-key'];
-      const expectedKey = this.configService.get<string>('AI_ENGINE_KEY', 'default-secret-key');
       
-      if (engineKey === expectedKey) {
-        this.logger.log(`AI Engine connected: ${client.id}`);
-        this.aiEngineSockets.add(client.id);
+      if (engineKey) {
+        const expectedKey = this.configService.get<string>('AI_ENGINE_KEY', 'default-secret-key');
+        if (engineKey === expectedKey) {
+          this.logger.log(`AI Engine connected: ${client.id}`);
+          this.aiEngineSockets.add(client.id);
+          return;
+        }
+        
+        this.logger.warn(`AI Engine connection rejected (invalid AI_ENGINE_KEY): ${client.id}`);
+        client.disconnect(true);
         return;
       }
       
-      this.logger.warn(`AI Engine connection rejected (invalid or missing AI_ENGINE_KEY): ${client.id}`);
+      this.logger.warn(`Client connection rejected (missing token): ${client.id}`);
       client.disconnect(true);
       return;
     }

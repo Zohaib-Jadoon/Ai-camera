@@ -2,107 +2,106 @@
 
 import Link from 'next/link';
 import { useState } from 'react';
-import { Shield, Eye, EyeOff, ArrowRight, Lock, Mail, User, Building } from 'lucide-react';
-import { motion } from 'framer-motion';
+import { Shield, Eye, EyeOff, ArrowRight, Lock, Mail, User, AlertCircle, RefreshCw } from 'lucide-react';
 import { useAuthRegister } from '@/hooks/use-api';
-import { useAuthStore } from '@/store/auth-store';
 import { useRouter } from 'next/navigation';
+import BackgroundParticles from '@/components/BackgroundParticles';
 
-export default function RegisterPage() {
+export default function Register() {
   const router = useRouter();
   const [showPass, setShowPass] = useState(false);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [success, setSuccess] = useState(false);
 
   const registerMutation = useAuthRegister();
-  const setAuth = useAuthStore((s) => s.setAuth);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     try {
-      const res = await registerMutation.mutateAsync({ name, email, password });
-      setAuth(res.user as any, res.access_token, (res as any).refresh_token);
-      router.push('/dashboard');
-
+      await registerMutation.mutateAsync({ name, email, password });
+      setSuccess(true);
+      setTimeout(() => router.push('/login'), 2000);
     } catch (err: any) {
       setError(err.response?.data?.message || 'Registration failed');
     }
   };
 
   return (
-    <div className="min-h-screen bg-[#020817] flex items-center justify-center relative py-12">
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[300px] bg-blue-600/10 rounded-full blur-3xl" />
-      <div className="absolute bottom-0 right-1/4 w-[400px] h-[300px] bg-purple-600/8 rounded-full blur-3xl" />
-      <div className="absolute inset-0 bg-[url('/grid.svg')] opacity-[0.02]" />
+    <div className="relative min-h-screen bg-[#03050a] flex items-center justify-center">
+      <BackgroundParticles />
 
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="relative z-10 w-full max-w-md mx-4"
-      >
+      <div className="relative z-10 w-full max-w-md mx-4">
         <div className="flex flex-col items-center mb-8">
           <Link href="/" className="relative mb-4 group block">
-            <div className="w-14 h-14 bg-blue-600/20 border border-blue-500/30 rounded-2xl flex items-center justify-center group-hover:bg-blue-600/30 transition-colors">
-              <Shield className="w-7 h-7 text-blue-400" />
+            <div className="w-14 h-14 bg-[#7eb8f7]/5 border border-[#7eb8f7]/20 hover:border-[#7eb8f7]/40 rounded-2xl flex items-center justify-center transition-all duration-300 shadow-[0_0_20px_rgba(126,184,247,0.1)] group-hover:scale-105">
+              <Shield className="w-7 h-7 text-[#7eb8f7]" />
             </div>
-            <div className="absolute inset-0 bg-blue-500/20 rounded-2xl blur-md" />
           </Link>
-          <h1 className="text-2xl font-bold text-white tracking-tight">Request Access</h1>
-          <p className="text-sm text-slate-500 mt-1">Register your organization for Madad Vision AI</p>
+          <h2 className="text-2xl font-bold tracking-tight text-slate-100 font-mono-data lowercase">register</h2>
+          <p className="text-xs text-slate-500 mt-1 font-mono-data">join the network as a security operator</p>
         </div>
 
-        <div className="glass-card rounded-2xl border border-slate-800/80 p-8">
+        <div className="p-8 rounded-2xl glass flex flex-col gap-5 w-full">
           {error && (
-            <div className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-xs">
+            <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/20 text-red-400 text-xs rounded-xl px-4 py-3">
+              <AlertCircle className="w-4 h-4 shrink-0" />
               {error}
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className="space-y-4">
+          {success && (
+            <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs rounded-xl px-4 py-3">
+              <Shield className="w-4 h-4 shrink-0" />
+              Operator account created. Redirecting to login...
+            </div>
+          )}
+
+          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
             <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1.5">Full Name</label>
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 font-mono-data">full name</label>
               <div className="relative">
-                <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-600" />
                 <input
                   type="text"
+                  required
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  required
                   placeholder="John Doe"
-                  className="w-full bg-slate-900/60 border border-slate-700/60 rounded-lg pl-10 pr-4 py-2.5 text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-blue-500/70 focus:bg-slate-900 transition-all"
+                  className="w-full bg-[#03050a]/40 border border-white/[0.04] focus:border-[#7eb8f7]/30 rounded-lg pl-10 pr-4 py-2.5 text-sm text-slate-200 focus:outline-none transition-colors"
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1.5">Work Email</label>
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 font-mono-data">email address</label>
               <div className="relative">
-                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-600" />
                 <input
                   type="email"
+                  required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  required
-                  placeholder="admin@company.com"
-                  className="w-full bg-slate-900/60 border border-slate-700/60 rounded-lg pl-10 pr-4 py-2.5 text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-blue-500/70 focus:bg-slate-900 transition-all"
+                  placeholder="operator@company.com"
+                  className="w-full bg-[#03050a]/40 border border-white/[0.04] focus:border-[#7eb8f7]/30 rounded-lg pl-10 pr-4 py-2.5 text-sm text-slate-200 focus:outline-none transition-colors font-mono-data"
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1.5">Password</label>
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 font-mono-data">password</label>
               <div className="relative">
-                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-600" />
                 <input
                   type={showPass ? 'text' : 'password'}
+                  required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  required
                   placeholder="••••••••"
-                  className="w-full bg-slate-900/60 border border-slate-700/60 rounded-lg pl-10 pr-10 py-2.5 text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-blue-500/70 focus:bg-slate-900 transition-all"
+                  className="w-full bg-[#03050a]/40 border border-white/[0.04] focus:border-[#7eb8f7]/30 rounded-lg pl-10 pr-10 py-2.5 text-sm text-slate-200 focus:outline-none transition-colors"
                 />
                 <button
                   type="button"
@@ -117,30 +116,24 @@ export default function RegisterPage() {
             <button
               type="submit"
               disabled={registerMutation.isPending}
-              className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-900 text-white font-semibold py-2.5 rounded-lg text-sm transition-all duration-200 mt-6"
+              className="mt-2 w-full py-3 rounded-lg bg-[#7eb8f7] hover:bg-[#4a9fe0] disabled:bg-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-[#03050a] font-bold flex items-center justify-center gap-2 transition-all shadow-[0_0_20px_rgba(126,184,247,0.15)]"
             >
               {registerMutation.isPending ? (
-                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                <RefreshCw className="w-4 h-4 animate-spin" />
               ) : (
-                <>Submit Request <ArrowRight className="w-4 h-4" /></>
+                <>Create Account <ArrowRight className="w-4 h-4" /></>
               )}
             </button>
           </form>
 
-          <div className="mt-6 pt-5 border-t border-slate-800/60 text-center">
-            <p className="text-xs text-slate-500">
-              Already have an account?{' '}
-              <Link href="/login" className="text-blue-400 hover:text-blue-300 font-medium transition-colors">
-                Sign in
-              </Link>
-            </p>
-          </div>
+          <p className="text-xs text-center text-slate-500 mt-2">
+            Already registered?{' '}
+            <Link href="/login" className="text-[#7eb8f7] hover:text-[#4a9fe0] transition-colors">
+              Sign in here
+            </Link>
+          </p>
         </div>
-
-        <p className="text-center text-[10px] text-slate-700 mt-6">
-          By registering, you agree to our Terms of Service and Privacy Policy.
-        </p>
-      </motion.div>
+      </div>
     </div>
   );
 }
