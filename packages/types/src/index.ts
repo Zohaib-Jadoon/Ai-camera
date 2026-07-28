@@ -31,3 +31,15 @@ export interface FaceEvent {
   confidence: number;
   timestamp: string;
 }
+
+export interface Alert {
+  id: string;
+  event_id?: string;
+  alert_type: string;
+  status: string;
+  severity?: string;
+  sent_at?: string;
+  camera_id?: string;
+}
+
+

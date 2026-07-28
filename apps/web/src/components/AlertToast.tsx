@@ -5,7 +5,7 @@ import { io, Socket } from 'socket.io-client';
 import {
   X, ShieldAlert, UserX, AlertTriangle, UserCheck,
   Car, Zap, ArrowLeftRight, PersonStanding, Swords,
-  HardHat, ScanLine, Fingerprint,
+  HardHat, ScanLine, Fingerprint, Siren,
 } from 'lucide-react';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:3001';
@@ -38,7 +38,6 @@ interface ToastAlert {
   time: string;
 }
 
-/** Extract JWT from Zustand persisted auth store */
 function getToken(): string | null {
   if (typeof window === 'undefined') return null;
   try {
@@ -57,6 +56,7 @@ function camLabel(id?: string) {
 
 export default function AlertToast() {
   const [alerts, setAlerts] = useState<ToastAlert[]>([]);
+  const [isBlinking, setIsBlinking] = useState(false);
   const socketRef = useRef<Socket | null>(null);
 
   const dismiss = useCallback((id: string) => {
@@ -66,7 +66,6 @@ export default function AlertToast() {
   useEffect(() => {
     const token = getToken();
 
-    // Connect once per mount — pass JWT so the gateway accepts the connection
     const socket = io(WS_URL, {
       transports: ['websocket', 'polling'],
       reconnectionAttempts: 5,
@@ -77,26 +76,26 @@ export default function AlertToast() {
 
     const handleAlert = (payload: AlertPayload) => {
       const toastId = payload.alertId ?? payload.id ?? `alert-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const alertType = payload.event_type ?? payload.alertType ?? payload.object_type ?? 'DETECTION';
+      const alertType = payload.event_type ?? payload.alertType ?? payload.object_type ?? 'ALERT';
 
       const messageMap: Record<string, string> = {
-        // Original alerts
-        INTRUSION: `🚨 Intrusion detected${camLabel(payload.camera_id)}`,
-        UNKNOWN_FACE: `👤 Unknown face detected${camLabel(payload.camera_id)}`,
-        KNOWN_FACE: `✅ ${payload.person_name || 'Known person'} arrived`,
-        // Traffic alerts
-        CONGESTION_WARNING: `🚗 Traffic congestion warning: ${payload.vehicle_count} vehicles in ${payload.zone_name || 'zone'}`,
-        CONGESTION_CRITICAL: `🚗 CRITICAL congestion: ${payload.vehicle_count} vehicles in ${payload.zone_name || 'zone'}`,
+        INTRUSION: `🚨 Intrusion breach detected${camLabel(payload.camera_id)}`,
+        UNKNOWN_FACE: `👤 Unregistered face detected${camLabel(payload.camera_id)}`,
+        KNOWN_FACE: `✅ ${payload.person_name || 'Known person'} identified`,
+        CONGESTION_WARNING: `🚗 Traffic queue warning: ${payload.vehicle_count} vehicles`,
+        CONGESTION_CRITICAL: `🚗 CRITICAL Congestion: ${payload.vehicle_count} vehicles stopped`,
         SPEED_VIOLATION: `⚡ Speed violation: ${payload.speed_kmh} km/h${camLabel(payload.camera_id)}`,
-        WRONG_WAY: `↩️ Wrong-way detected${payload.line_name ? ` at ${payload.line_name}` : ''}${camLabel(payload.camera_id)}`,
-        // Safety alerts
-        FALL_DETECTED: `🆘 Fall detected${camLabel(payload.camera_id)} — immediate attention required`,
-        FIGHT_DETECTED: `⚠️ Fight/aggression detected${camLabel(payload.camera_id)}`,
-        PPE_VIOLATION: `🦺 PPE violation: ${(payload.violations || []).join(', ') || 'non-compliant'}${camLabel(payload.camera_id)}`,
-        // Informational
-        LICENSE_PLATE: `🔤 Plate detected: ${payload.plate_text}${camLabel(payload.camera_id)}`,
-        CROSS_CAMERA_MATCH: `🔗 Person ${payload.global_id} also seen on cam ${payload.matched_camera?.slice(0, 8) || '?'}`,
-        DEFAULT: `${(payload.object_type ?? 'Object').toUpperCase()} detected${camLabel(payload.camera_id)}`,
+        WRONG_WAY: `↩️ Wrong-way violation${payload.line_name ? ` at ${payload.line_name}` : ''}${camLabel(payload.camera_id)}`,
+        FALL_DETECTED: `🆘 Emergency: Person fall detected${camLabel(payload.camera_id)}`,
+        FIGHT_DETECTED: `👊 Hostility / Violence detected${camLabel(payload.camera_id)}`,
+        PPE_VIOLATION: `🦺 PPE Non-compliance: ${(payload.violations || []).join(', ') || 'Violation'}${camLabel(payload.camera_id)}`,
+        WEAPON_DETECTED: `⚔️ CRITICAL: Weapon detected${camLabel(payload.camera_id)} — IMMEDIATE ACTION`,
+        ACCIDENT_DETECTED: `💥 Vehicle collision / Accident detected${camLabel(payload.camera_id)}`,
+        BREAKIN_DETECTED: `🚨 Perimeter breach / Break-in detected${camLabel(payload.camera_id)}`,
+        BEHAVIOR_DETECTED: `⚠️ Suspicious loitering detected${camLabel(payload.camera_id)}`,
+        LICENSE_PLATE: `🔤 Plate scanned: ${payload.plate_text}${camLabel(payload.camera_id)}`,
+        CROSS_CAMERA_MATCH: `🔗 ReID Match: Person seen on cam ${payload.matched_camera?.slice(0, 8) || '?'}`,
+        DEFAULT: `Alert triggered [${alertType}]${camLabel(payload.camera_id)}`,
       };
 
       const toast: ToastAlert = {
@@ -109,31 +108,41 @@ export default function AlertToast() {
           : new Date().toLocaleTimeString(),
       };
 
-      setAlerts((prev) => [toast, ...prev].slice(0, 8));
+      setAlerts((prev) => [toast, ...prev].slice(0, 6));
 
-      // Auto-dismiss: critical stays 10s, others 6s
-      const criticalTypes = ['FALL_DETECTED', 'FIGHT_DETECTED', 'INTRUSION', 'CONGESTION_CRITICAL'];
+      const criticalTypes = [
+        'INTRUSION',
+        'FALL_DETECTED',
+        'FIGHT_DETECTED',
+        'WEAPON_DETECTED',
+        'ACCIDENT_DETECTED',
+        'BREAKIN_DETECTED',
+        'CONGESTION_CRITICAL'
+      ];
+      if (criticalTypes.includes(alertType)) {
+        setIsBlinking(true);
+        setTimeout(() => setIsBlinking(false), 3500);
+      }
+
       const ttl = criticalTypes.includes(alertType) ? 10000 : 6000;
       setTimeout(() => dismiss(toastId), ttl);
     };
 
     const handlePlate = (payload: AlertPayload) => {
-      handleAlert({ ...payload, object_type: 'LICENSE_PLATE' });
+      handleAlert({ ...payload, event_type: 'LICENSE_PLATE' });
     };
 
     const handleReID = (payload: AlertPayload) => {
-      handleAlert({ ...payload, object_type: 'CROSS_CAMERA_MATCH' });
+      handleAlert({ ...payload, event_type: 'CROSS_CAMERA_MATCH' });
     };
 
     socket.on('alert', handleAlert);
-    socket.on('detection', handleAlert);
     socket.on('intrusion', handleAlert);
     socket.on('plate_detected', handlePlate);
     socket.on('reid_match', handleReID);
 
     return () => {
       socket.off('alert', handleAlert);
-      socket.off('detection', handleAlert);
       socket.off('intrusion', handleAlert);
       socket.off('plate_detected', handlePlate);
       socket.off('reid_match', handleReID);
@@ -142,62 +151,75 @@ export default function AlertToast() {
     };
   }, [dismiss]);
 
-  if (alerts.length === 0) return null;
-
   const iconMap: Record<string, React.ReactNode> = {
-    INTRUSION: <ShieldAlert className="w-4 h-4 text-red-400 flex-shrink-0" />,
-    UNKNOWN_FACE: <UserX className="w-4 h-4 text-amber-400 flex-shrink-0" />,
-    KNOWN_FACE: <UserCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />,
-    CONGESTION_WARNING: <Car className="w-4 h-4 text-yellow-400 flex-shrink-0" />,
-    CONGESTION_CRITICAL: <Car className="w-4 h-4 text-red-400 flex-shrink-0" />,
-    SPEED_VIOLATION: <Zap className="w-4 h-4 text-orange-400 flex-shrink-0" />,
-    WRONG_WAY: <ArrowLeftRight className="w-4 h-4 text-red-400 flex-shrink-0" />,
-    FALL_DETECTED: <PersonStanding className="w-4 h-4 text-red-400 flex-shrink-0" />,
-    FIGHT_DETECTED: <Swords className="w-4 h-4 text-red-400 flex-shrink-0" />,
-    PPE_VIOLATION: <HardHat className="w-4 h-4 text-amber-400 flex-shrink-0" />,
-    LICENSE_PLATE: <ScanLine className="w-4 h-4 text-blue-400 flex-shrink-0" />,
-    CROSS_CAMERA_MATCH: <Fingerprint className="w-4 h-4 text-purple-400 flex-shrink-0" />,
-    DEFAULT: <AlertTriangle className="w-4 h-4 text-orange-400 flex-shrink-0" />,
+    INTRUSION: <Siren className="w-5 h-5 text-red-400 flex-shrink-0 animate-bounce" />,
+    UNKNOWN_FACE: <UserX className="w-5 h-5 text-amber-400 flex-shrink-0" />,
+    KNOWN_FACE: <UserCheck className="w-5 h-5 text-emerald-400 flex-shrink-0" />,
+    CONGESTION_WARNING: <Car className="w-5 h-5 text-amber-400 flex-shrink-0" />,
+    CONGESTION_CRITICAL: <Car className="w-5 h-5 text-red-400 flex-shrink-0 animate-pulse" />,
+    SPEED_VIOLATION: <Zap className="w-5 h-5 text-sky-400 flex-shrink-0" />,
+    WRONG_WAY: <ArrowLeftRight className="w-5 h-5 text-red-400 flex-shrink-0" />,
+    FALL_DETECTED: <PersonStanding className="w-5 h-5 text-red-400 flex-shrink-0 animate-bounce" />,
+    FIGHT_DETECTED: <Swords className="w-5 h-5 text-red-400 flex-shrink-0 animate-pulse" />,
+    PPE_VIOLATION: <HardHat className="w-5 h-5 text-amber-400 flex-shrink-0" />,
+    WEAPON_DETECTED: <Siren className="w-5 h-5 text-red-500 flex-shrink-0 animate-ping" />,
+    ACCIDENT_DETECTED: <Car className="w-5 h-5 text-red-400 flex-shrink-0 animate-pulse" />,
+    BREAKIN_DETECTED: <ShieldAlert className="w-5 h-5 text-red-400 flex-shrink-0" />,
+    BEHAVIOR_DETECTED: <UserX className="w-5 h-5 text-amber-400 flex-shrink-0" />,
+    LICENSE_PLATE: <ScanLine className="w-5 h-5 text-sky-400 flex-shrink-0" />,
+    CROSS_CAMERA_MATCH: <Fingerprint className="w-5 h-5 text-purple-400 flex-shrink-0" />,
+    DEFAULT: <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0" />,
   };
 
   const colorMap: Record<string, string> = {
-    INTRUSION: 'border-red-500/40 bg-red-950/50',
-    UNKNOWN_FACE: 'border-amber-500/40 bg-amber-950/50',
-    KNOWN_FACE: 'border-emerald-500/40 bg-emerald-950/50',
-    CONGESTION_WARNING: 'border-yellow-500/40 bg-yellow-950/50',
-    CONGESTION_CRITICAL: 'border-red-500/40 bg-red-950/50',
-    SPEED_VIOLATION: 'border-orange-500/40 bg-orange-950/50',
-    WRONG_WAY: 'border-red-500/40 bg-red-950/50',
-    FALL_DETECTED: 'border-red-500/40 bg-red-950/60',
-    FIGHT_DETECTED: 'border-red-500/40 bg-red-950/60',
-    PPE_VIOLATION: 'border-amber-500/40 bg-amber-950/50',
-    LICENSE_PLATE: 'border-blue-500/40 bg-blue-950/50',
-    CROSS_CAMERA_MATCH: 'border-purple-500/40 bg-purple-950/50',
-    DEFAULT: 'border-orange-500/40 bg-orange-950/50',
+    INTRUSION: 'border-red-500/50 bg-red-950/80 shadow-[0_0_20px_rgba(239,68,68,0.3)]',
+    WEAPON_DETECTED: 'border-red-500 bg-red-950/90 shadow-[0_0_30px_rgba(239,68,68,0.5)] border-2',
+    ACCIDENT_DETECTED: 'border-red-500/60 bg-red-950/80 shadow-[0_0_20px_rgba(239,68,68,0.3)]',
+    FIGHT_DETECTED: 'border-red-500/60 bg-red-950/80 shadow-[0_0_20px_rgba(239,68,68,0.3)]',
+    UNKNOWN_FACE: 'border-amber-500/40 bg-amber-950/60',
+    KNOWN_FACE: 'border-emerald-500/40 bg-emerald-950/60',
+    CONGESTION_CRITICAL: 'border-red-500/50 bg-red-950/70',
+    SPEED_VIOLATION: 'border-sky-500/40 bg-sky-950/60',
+    LICENSE_PLATE: 'border-sky-500/40 bg-sky-950/60',
+    CROSS_CAMERA_MATCH: 'border-purple-500/40 bg-purple-950/60',
+    DEFAULT: 'border-slate-700/80 bg-slate-900/90',
   };
 
   return (
-    <div className="fixed bottom-4 left-4 right-4 sm:left-auto sm:right-4 sm:w-96 z-50 space-y-2 pointer-events-none">
-      {alerts.map((alert) => (
+    <>
+      {/* Full-screen red alert vignette for critical threat events */}
+      {isBlinking && (
         <div
-          key={alert.id}
-          className={`glass-card border ${colorMap[alert.type] ?? colorMap.DEFAULT} text-white p-4 rounded-lg shadow-lg pointer-events-auto animate-in slide-in-from-right-5 duration-300`}
-        >
-          <div className="flex items-start gap-2">
-            {iconMap[alert.type] ?? iconMap.DEFAULT}
-            <div className="flex-1 min-w-0">
-              <p className="font-semibold text-sm text-white truncate">{alert.message}</p>
-              <p className="text-xs text-slate-400 mt-0.5">{alert.time}</p>
+          className="fixed inset-0 pointer-events-none z-[9999] border-[14px] border-red-600 shadow-[inset_0_0_120px_rgba(239,68,68,0.85)] animate-pulse"
+          style={{ animationDuration: '0.4s' }}
+        />
+      )}
+
+      {/* Toast Alert Drawer */}
+      <div className="fixed bottom-5 left-4 right-4 sm:left-auto sm:right-6 sm:w-96 z-50 space-y-3 pointer-events-none">
+        {alerts.map((alert) => (
+          <div
+            key={alert.id}
+            className={`glass-panel border ${colorMap[alert.type] ?? colorMap.DEFAULT} text-white p-4 rounded-2xl shadow-2xl pointer-events-auto transition-all duration-300 transform translate-y-0`}
+          >
+            <div className="flex items-start gap-3">
+              {iconMap[alert.type] ?? iconMap.DEFAULT}
+              <div className="flex-1 min-w-0">
+                <p className="font-bold text-xs tracking-wide text-white font-mono-data uppercase">{alert.type.replace(/_/g, ' ')}</p>
+                <p className="text-xs text-slate-200 mt-0.5 leading-snug">{alert.message}</p>
+                <p className="text-[10px] text-slate-400 mt-1 font-mono-data">{alert.time}</p>
+              </div>
+              <button
+                onClick={() => dismiss(alert.id)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors flex-shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
-            <button
-              onClick={() => dismiss(alert.id)}
-              className="text-slate-500 hover:text-slate-300 transition-colors ml-1 flex-shrink-0"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
           </div>
-        </div>
-      ))}
-    </div>
+        ))}
+      </div>
+    </>
   );
 }
+

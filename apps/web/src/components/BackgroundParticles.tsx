@@ -29,13 +29,15 @@ export default function BackgroundParticles() {
   }, []);
 
   return (
-    <div className="fixed inset-0 pointer-events-none overflow-hidden z-0 bg-[#03050a]">
-      {/* Grid overlay */}
-      <div className="absolute inset-0 bg-[linear-gradient(to_right,#14161f_1px,transparent_1px),linear-gradient(to_bottom,#14161f_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,#000_70%,transparent_100%)] opacity-[0.25]" />
-      
-      {/* Ambient glows */}
-      <div className="absolute top-[-10%] left-1/4 w-[600px] h-[600px] bg-slate-900/10 rounded-full blur-[140px]" />
-      <div className="absolute top-[30%] right-[-10%] w-[500px] h-[500px] bg-neutral-900/15 rounded-full blur-[120px]" />
+    <div className="fixed inset-0 pointer-events-none overflow-hidden z-0 bg-[#050814]">
+      {/* Ambient Radial Lights */}
+      <div className="absolute top-[-15%] left-[20%] w-[800px] h-[600px] bg-sky-600/10 rounded-full blur-[160px]" />
+      <div className="absolute top-[40%] right-[-10%] w-[600px] h-[600px] bg-indigo-600/10 rounded-full blur-[150px]" />
+      <div className="absolute bottom-[-10%] left-[-10%] w-[700px] h-[500px] bg-sky-900/10 rounded-full blur-[180px]" />
+
+      {/* Subtle Grid overlay */}
+      <div className="absolute inset-0 bg-[linear-gradient(to_right,#1e293b15_1px,transparent_1px),linear-gradient(to_bottom,#1e293b15_1px,transparent_1px)] bg-[size:5rem_5rem] [mask-image:radial-gradient(ellipse_70%_60%_at_50%_40%,#000_60%,transparent_100%)] opacity-30" />
+
 
       {/* Floating particles */}
       {particles.map((p) => (

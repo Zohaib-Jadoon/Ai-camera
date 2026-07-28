@@ -7,8 +7,9 @@ import { Send, MapPin, Phone, Mail } from 'lucide-react';
 
 const fFadeUp = {
   hidden: { opacity: 0, y: 20 },
-  visible: { opacity: 1, y: 0, transition: { duration: 0.7, ease: [0.16, 1, 0.3, 1] } }
+  visible: { opacity: 1, y: 0, transition: { duration: 0.7, ease: [0.16, 1, 0.3, 1] as const } }
 };
+
 
 const fStagger = {
   visible: { transition: { staggerChildren: 0.1 } }
@@ -47,7 +48,7 @@ export default function Contact() {
           <motion.div
             initial={{ opacity: 0, x: -30 }}
             animate={{ opacity: 1, x: 0 }}
-            transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
+            transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] as const }}
             className="flex flex-col gap-8"
           >
             <div className="flex gap-4 items-start">
@@ -92,7 +93,7 @@ export default function Contact() {
           <motion.form
             initial={{ opacity: 0, x: 30 }}
             animate={{ opacity: 1, x: 0 }}
-            transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
+            transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] as const }}
             onSubmit={(e) => e.preventDefault()}
             className="p-8 rounded-2xl glass flex flex-col gap-5 w-full"
           >

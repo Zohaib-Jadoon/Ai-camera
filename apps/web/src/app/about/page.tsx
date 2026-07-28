@@ -8,12 +8,13 @@ import { Shield, Eye, ShieldAlert, Cpu } from 'lucide-react';
 
 const fFadeUp = {
   hidden: { opacity: 0, y: 20 },
-  visible: { opacity: 1, y: 0, transition: { duration: 0.7, ease: [0.16, 1, 0.3, 1] } }
+  visible: { opacity: 1, y: 0, transition: { duration: 0.7, ease: [0.16, 1, 0.3, 1] as const } }
 };
 
 const fStagger = {
   visible: { transition: { staggerChildren: 0.1 } }
 };
+
 
 export default function About() {
   return (

@@ -96,8 +96,11 @@ export interface AnalyticsSummary {
   totalFaceEvents: number;
   knownFaces: number;
   unknownFaces: number;
+  fps_average?: number;
+  inference_latency?: number;
   byType: { type: string; count: number }[];
 }
+
 
 export interface User {
   id: string;
@@ -458,6 +461,11 @@ export function useResetPassword() {
     },
   });
 }
+
+export const useAuthForgotPassword = useForgotPassword;
+export const useAuthResetPassword = useResetPassword;
+export const useStats = useAnalyticsSummary;
+
 
 // ─── Alert Rules ──────────────────────────────────────────────────────────────
 
