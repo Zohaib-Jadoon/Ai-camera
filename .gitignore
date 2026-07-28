@@ -19,6 +19,13 @@ apps/graphify-out
 debug_test
 Madad_Vision_AI_Client_Briefing.pdf
 
+# Video recordings (stored in PostgreSQL DB, ignore local files)
+recordings/
+temp_recordings/
+apps/backend/recordings/
+apps/backend/temp_recordings/
+*.mp4
+
 # Editor & Tool Cache metadata
 .vscode/
 .graphify_python

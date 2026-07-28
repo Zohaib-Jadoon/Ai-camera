@@ -239,7 +239,8 @@ model Recording {
   id           String    @id @default(uuid())
   camera_id    String
   camera       Camera    @relation(fields: [camera_id], references: [id], onDelete: Cascade)
-  filepath     String              // absolute path or MinIO object key
+  filepath     String?             // optional file path reference
+  video_data   Bytes?              // Binary video MP4 data stored directly in PostgreSQL database
   trigger      String              // 'person' | 'car' | 'intrusion' | 'face' …
   duration_sec Int?                // actual clip length in seconds
   size_bytes   Int?

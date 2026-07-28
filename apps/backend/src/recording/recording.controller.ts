@@ -39,7 +39,7 @@ export class RecordingController {
 
   @Get(':id/download')
   @Roles(Role.ADMIN, Role.SECURITY_OPERATOR)
-  @ApiOperation({ summary: 'Download a recording MP4 file' })
+  @ApiOperation({ summary: 'Download a recording MP4 file directly from database storage' })
   async download(
     @Param('id') id: string,
     @Res({ passthrough: true }) res: Response,
@@ -49,20 +49,28 @@ export class RecordingController {
       throw new NotFoundException('Recording not found');
     }
 
-    const filepath = recording.filepath;
-    if (!fs.existsSync(filepath)) {
-      throw new NotFoundException('Recording file not found');
+    // Direct database binary video stream
+    if (recording.video_data && recording.video_data.length > 0) {
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('Content-Length', recording.video_data.length);
+      res.setHeader('Content-Disposition', `inline; filename="recording_${id}.mp4"`);
+      return new StreamableFile(Buffer.from(recording.video_data));
     }
 
-    const stat = fs.statSync(filepath);
-    const filename = path.basename(filepath);
+    // Fallback to local path if present
+    if (recording.filepath && fs.existsSync(recording.filepath)) {
+      const stat = fs.statSync(recording.filepath);
+      const filename = path.basename(recording.filepath);
 
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Length', stat.size);
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('Content-Length', stat.size);
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
-    const stream = fs.createReadStream(filepath);
-    return new StreamableFile(stream);
+      const stream = fs.createReadStream(recording.filepath);
+      return new StreamableFile(stream);
+    }
+
+    throw new NotFoundException('Video content not found in database or storage');
   }
 
   @Get('purge')

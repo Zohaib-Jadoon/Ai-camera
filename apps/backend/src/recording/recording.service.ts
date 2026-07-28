@@ -1,12 +1,13 @@
 /**
- * RecordingService — Frigate-inspired event-triggered recording with retention.
+ * RecordingService — Event-triggered recording stored directly in PostgreSQL database.
  *
  * Flow:
  *   1. AI Engine emits `start_recording` Socket.IO event when a detection fires.
- *   2. EventsGateway calls `startClip()` which records metadata and kicks off
- *      an FFmpeg process.
- *   3. A periodic job calls `purgeOldClips(retentionDays)` to delete clips
- *      beyond the retention window and free disk/object-storage space.
+ *   2. EventsGateway calls `startClip()` which creates a Recording row and spawns FFmpeg.
+ *   3. FFmpeg records to a temporary file, which is then read into a binary Buffer,
+ *      stored directly into the `Recording.video_data` byte column in PostgreSQL DB,
+ *      and the temporary local file is deleted immediately.
+ *   4. Scheduled purge job removes old database rows beyond the retention window.
  */
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
@@ -15,28 +16,21 @@ import * as fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
 import { path as ffmpegPath } from '@ffmpeg-installer/ffmpeg';
 
-const RECORDINGS_DIR =
-  process.env.RECORDINGS_DIR ?? path.join(process.cwd(), 'recordings');
+const TEMP_RECORDINGS_DIR =
+  process.env.TEMP_RECORDINGS_DIR ?? path.join(process.cwd(), 'temp_recordings');
 
 @Injectable()
 export class RecordingService {
   private readonly logger = new Logger(RecordingService.name);
 
   constructor(private readonly prisma: PrismaService) {
-    // Ensure local recordings directory exists
-    if (!fs.existsSync(RECORDINGS_DIR)) {
-      fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
+    if (!fs.existsSync(TEMP_RECORDINGS_DIR)) {
+      fs.mkdirSync(TEMP_RECORDINGS_DIR, { recursive: true });
     }
   }
 
   /**
-   * Create a Recording row and spawn an FFmpeg clip.
-   *
-   * @param cameraId   Camera that triggered the recording.
-   * @param trigger    Detection type that caused the recording (e.g. 'person').
-   * @param durationSec How long to record in seconds (default 30).
-   * @param rtspUrl    Source URL for FFmpeg — set from the camera's record_url
-   *                   (high-res) or rtsp_url as fallback.
+   * Create a Recording row in DB and record an FFmpeg clip into database binary storage.
    */
   async startClip(
     cameraId: string,
@@ -45,21 +39,20 @@ export class RecordingService {
     rtspUrl?: string,
   ) {
     const startedAt = new Date();
-    const filename = `${cameraId}_${startedAt.toISOString().replace(/[:.]/g, '-')}.mp4`;
-    const filepath = path.join(RECORDINGS_DIR, filename);
+    const tempFilename = `temp_${cameraId}_${startedAt.getTime()}.mp4`;
+    const tempFilepath = path.join(TEMP_RECORDINGS_DIR, tempFilename);
 
     const recording = await this.prisma.recording.create({
       data: {
         camera_id: cameraId,
         trigger,
-        filepath,
         started_at: startedAt,
         duration_sec: durationSec,
       },
     });
 
     this.logger.log(
-      `Recording started: ${filename} [trigger=${trigger}, duration=${durationSec}s]`,
+      `Recording started for DB: ID=${recording.id} [trigger=${trigger}, duration=${durationSec}s]`,
     );
 
     if (rtspUrl && ffmpegPath) {
@@ -68,25 +61,38 @@ export class RecordingService {
           .setFfmpegPath(ffmpegPath)
           .inputOptions('-rtsp_transport', 'tcp')
           .outputOptions(['-t', `${durationSec}`, '-c:v', 'copy', '-an'])
-          .output(filepath)
+          .output(tempFilepath)
           .on('end', async () => {
             try {
-              const stat = fs.statSync(filepath);
-              await this.prisma.recording.update({
-                where: { id: recording.id },
-                data: { ended_at: new Date(), size_bytes: stat.size },
-              });
-              this.logger.log(
-                `Recording finished: ${filename} (${stat.size} bytes)`,
-              );
+              if (fs.existsSync(tempFilepath)) {
+                const buffer = fs.readFileSync(tempFilepath);
+                await this.prisma.recording.update({
+                  where: { id: recording.id },
+                  data: {
+                    ended_at: new Date(),
+                    size_bytes: buffer.length,
+                    video_data: buffer,
+                  },
+                });
+
+                // Immediately clean up temporary local file
+                fs.unlinkSync(tempFilepath);
+
+                this.logger.log(
+                  `Recording stored in Database: ID=${recording.id} (${buffer.length} bytes)`,
+                );
+              }
             } catch (err: any) {
               this.logger.error(
-                `Recording post-process error: ${err.message}`,
+                `Database recording save error: ${err.message}`,
               );
             }
           })
           .on('error', (err) => {
-            this.logger.error(`Recording error: ${err.message}`);
+            this.logger.error(`Recording FFmpeg error: ${err.message}`);
+            if (fs.existsSync(tempFilepath)) {
+              fs.unlinkSync(tempFilepath);
+            }
           })
           .run();
       } catch (err: any) {
@@ -102,35 +108,20 @@ export class RecordingService {
   }
 
   /**
-   * Delete Recording rows (and local files) older than `retentionDays`.
-   * Call this on a schedule (e.g. daily at midnight via a NestJS cron job).
+   * Delete Recording database rows older than `retentionDays`.
    */
   async purgeOldClips(retentionDays = 7): Promise<number> {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - retentionDays);
 
-    const old = await this.prisma.recording.findMany({
+    const result = await this.prisma.recording.deleteMany({
       where: { started_at: { lt: cutoff } },
-      select: { id: true, filepath: true },
     });
 
-    let deleted = 0;
-    for (const rec of old) {
-      try {
-        if (fs.existsSync(rec.filepath)) {
-          fs.unlinkSync(rec.filepath);
-        }
-        await this.prisma.recording.delete({ where: { id: rec.id } });
-        deleted++;
-      } catch (err: any) {
-        this.logger.warn(`Failed to purge recording ${rec.id}: ${err.message}`);
-      }
-    }
-
     this.logger.log(
-      `Retention purge: removed ${deleted} clips older than ${retentionDays} days`,
+      `Database purge: removed ${result.count} clips older than ${retentionDays} days`,
     );
-    return deleted;
+    return result.count;
   }
 
   /** Find a single recording by ID. */
@@ -145,6 +136,16 @@ export class RecordingService {
   async findByCamera(cameraId: string, limit = 50) {
     return this.prisma.recording.findMany({
       where: { camera_id: cameraId },
+      select: {
+        id: true,
+        camera_id: true,
+        trigger: true,
+        duration_sec: true,
+        size_bytes: true,
+        started_at: true,
+        ended_at: true,
+        createdAt: true,
+      },
       orderBy: { started_at: 'desc' },
       take: limit,
     });
@@ -154,9 +155,19 @@ export class RecordingService {
   async findAll(trigger?: string, limit = 100) {
     return this.prisma.recording.findMany({
       where: trigger ? { trigger } : undefined,
+      select: {
+        id: true,
+        camera_id: true,
+        trigger: true,
+        duration_sec: true,
+        size_bytes: true,
+        started_at: true,
+        ended_at: true,
+        createdAt: true,
+        camera: { select: { name: true, location: true } },
+      },
       orderBy: { started_at: 'desc' },
       take: limit,
-      include: { camera: { select: { name: true, location: true } } },
     });
   }
 }
