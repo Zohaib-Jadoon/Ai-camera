@@ -208,44 +208,60 @@ export default function LiveMonitoring() {
       qc.invalidateQueries({ queryKey: ['cameras'] });
     };
 
-    const alertHandler = (payload: any) => {
-      const objType = (payload.object_type || payload.alert_type || '').toUpperCase();
-      const isThreat = ['INTRUSION', 'WEAPON', 'KNIFE', 'GUN', 'FIGHT', 'FALL', 'SCISSORS',
-        'HANDGUN', 'PISTOL', 'RIFLE', 'WEAPON_DETECTED', 'FIGHT_DETECTED', 'FALL_DETECTED'
-      ].some(t => objType.includes(t));
-
-      if (isThreat && payload.camera_id) {
-        const camId = payload.camera_id;
-        const threatMsg = payload.message || `${objType} Detected`;
-        setActiveThreats(prev => ({ ...prev, [camId]: { active: true, type: objType, message: threatMsg } }));
-        if (!muted) playThreatSiren();
-        setTimeout(() => {
-          setActiveThreats(prev => ({ ...prev, [camId]: { active: false, type: '', message: '' } }));
-        }, 10000);
-      }
-    };
-
-    // threat_alert is the high-priority path (no DB round-trip)
-    const threatHandler = (payload: any) => {
-      const camId = payload.camera_id;
+    const triggerThreat = (camId: string, objType: string, threatMsg: string) => {
       if (!camId) return;
-      const objType = (payload.object_type || 'THREAT').toUpperCase();
-      const threatMsg = payload.message || `⚠ ${objType} DETECTED`;
-      setActiveThreats(prev => ({ ...prev, [camId]: { active: true, type: objType, message: threatMsg } }));
+      setActiveThreats(prev => ({ ...prev, [camId]: { active: true, type: objType.toUpperCase(), message: threatMsg } }));
       if (!muted) playThreatSiren();
       setTimeout(() => {
         setActiveThreats(prev => ({ ...prev, [camId]: { active: false, type: '', message: '' } }));
       }, 12000);
     };
 
+    const alertHandler = (payload: any) => {
+      const objType = (payload.object_type || payload.alert_type || '').toUpperCase();
+      const isThreat = ['INTRUSION', 'WEAPON', 'KNIFE', 'GUN', 'FIGHT', 'FALL', 'SCISSORS',
+        'HANDGUN', 'PISTOL', 'RIFLE', 'SWORD', 'AXE', 'BAT', 'CONGESTION', 'TRAFFIC',
+        'WEAPON_DETECTED', 'FIGHT_DETECTED', 'FALL_DETECTED'
+      ].some(t => objType.includes(t));
+
+      if (isThreat && payload.camera_id) {
+        triggerThreat(payload.camera_id, objType, payload.message || `⚠️ ${objType} Detected`);
+      }
+    };
+
+    const threatHandler = (payload: any) => {
+      const objType = (payload.object_type || 'WEAPON').toUpperCase();
+      triggerThreat(payload.camera_id, objType, payload.message || `⚠️ CRITICAL: ${objType} DETECTED`);
+    };
+
+    const congestionHandler = (payload: any) => {
+      const level = (payload.level || 'HEAVY').toUpperCase();
+      triggerThreat(payload.camera_id, `CONGESTION_${level}`, `⚠️ TRAFFIC CONGESTION: ${payload.zone_name || 'Zone'} (${payload.vehicle_count || 0} vehicles)`);
+    };
+
+    const intrusionHandler = (payload: any) => {
+      triggerThreat(payload.camera_id, 'INTRUSION', `⚠️ ZONE INTRUSION: ${payload.zone_name || 'Zone'} by ${payload.object_type || 'object'}`);
+    };
+
+    const safetyHandler = (payload: any) => {
+      const evtType = (payload.event_type || 'SAFETY_VIOLATION').toUpperCase();
+      triggerThreat(payload.camera_id, evtType, `⚠️ SAFETY EVENT: ${evtType}`);
+    };
+
     socket.on('camera_status', statusHandler);
     socket.on('alert', alertHandler);
     socket.on('threat_alert', threatHandler);
+    socket.on('congestion', congestionHandler);
+    socket.on('intrusion', intrusionHandler);
+    socket.on('safety_event', safetyHandler);
 
     return () => {
       socket.off('camera_status', statusHandler);
       socket.off('alert', alertHandler);
       socket.off('threat_alert', threatHandler);
+      socket.off('congestion', congestionHandler);
+      socket.off('intrusion', intrusionHandler);
+      socket.off('safety_event', safetyHandler);
     };
   }, [qc, muted, playThreatSiren]);
 
@@ -421,6 +437,15 @@ export default function LiveMonitoring() {
                         refreshTrigger={refreshTriggers[cam.id] ?? 0}
                         isZoomed={!!zoomedCams[cam.id]}
                       />
+                      {/* Bright Red Flashing Strobe Overlay for ANY Weapon, Fighting, Traffic Congestion or Intrusion */}
+                      {isThreatActive && (
+                        <div className="absolute inset-0 pointer-events-none z-30 bg-red-600/30 border-[8px] border-red-600 animate-pulse shadow-[inset_0_0_90px_rgba(239,68,68,0.95)] flex items-center justify-center">
+                          <div className="bg-red-600/90 text-white font-black text-xs px-4 py-2 rounded-xl border border-red-400 shadow-2xl animate-bounce flex items-center gap-2">
+                            <ShieldAlert className="w-5 h-5" />
+                            <span>CRITICAL ALERT: {threatInfo?.type || 'THREAT'}</span>
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     {/* Top Status & Overlay Header */}

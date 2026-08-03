@@ -12,6 +12,16 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 
+const SOP_OPTIONS = [
+  { value: 'general_detection', label: 'Default (General Detection)' },
+  { value: 'hardhat_required', label: 'Hardhat Required' },
+  { value: 'fire_smoke', label: 'Fire & Smoke Detection' },
+  { value: 'weapon_detection', label: 'Weapon Detection' },
+  { value: 'ppe_compliance', label: 'PPE Compliance' },
+  { value: 'crowd_density', label: 'Crowd Density' },
+  { value: 'vehicle_counting', label: 'Vehicle Counting' },
+];
+
 export default function CamerasPage() {
   const { data: cameras = [], isLoading } = useCameras();
   const createCamera = useCreateCamera();
@@ -24,8 +34,8 @@ export default function CamerasPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [group, setGroup] = useState('All');
 
-  const [form, setForm] = useState({ name: '', rtsp_url: '', location: '', group: '' });
-  const [editForm, setEditForm] = useState({ name: '', rtsp_url: '', location: '' });
+  const [form, setForm] = useState({ name: '', rtsp_url: '', location: '', group: '', sop_name: 'general_detection' });
+  const [editForm, setEditForm] = useState({ name: '', rtsp_url: '', location: '', sop_name: 'general_detection' });
 
   // Bulk import state
   const [showImport, setShowImport] = useState(false);
@@ -48,7 +58,7 @@ export default function CamerasPage() {
       location: form.location,
       status: 'OFFLINE',
     });
-    setForm({ name: '', rtsp_url: '', location: '', group: '' });
+    setForm({ name: '', rtsp_url: '', location: '', group: '', sop_name: 'general_detection' });
     setShowAdd(false);
   };
 
@@ -58,12 +68,18 @@ export default function CamerasPage() {
       name: editForm.name,
       rtsp_url: editForm.rtsp_url,
       location: editForm.location,
+      sop_name: editForm.sop_name || 'general_detection',
     });
     setEditingId(null);
   };
 
   const startEdit = (cam: CameraType) => {
-    setEditForm({ name: cam.name, rtsp_url: cam.rtsp_url, location: cam.location || '' });
+    setEditForm({
+      name: cam.name,
+      rtsp_url: cam.rtsp_url,
+      location: cam.location || '',
+      sop_name: cam.sop_name || 'general_detection',
+    });
     setEditingId(cam.id);
   };
 
@@ -324,8 +340,8 @@ function CameraCard({
 }: {
   cam: CameraType;
   isEditing: boolean;
-  editForm: { name: string; rtsp_url: string; location: string };
-  setEditForm: (f: { name: string; rtsp_url: string; location: string }) => void;
+  editForm: { name: string; rtsp_url: string; location: string; sop_name: string };
+  setEditForm: (f: { name: string; rtsp_url: string; location: string; sop_name: string }) => void;
   onStartEdit: () => void;
   onSaveEdit: () => void;
   onCancelEdit: () => void;
@@ -381,6 +397,20 @@ function CameraCard({
                 onChange={(e) => setEditForm({ ...editForm, location: e.target.value })}
                 className="w-full bg-slate-900/60 border border-slate-700/60 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500/50"
               />
+            </div>
+            <div>
+              <label className="block text-[10px] font-medium text-slate-400 mb-1">AI Model (SOP)</label>
+              <select
+                value={editForm.sop_name || 'general_detection'}
+                onChange={(e) => setEditForm({ ...editForm, sop_name: e.target.value })}
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500/50"
+              >
+                {SOP_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value} className="bg-slate-900 text-white">
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
             </div>
             <div className="flex justify-end gap-2 pt-1">
               <button onClick={onCancelEdit} className="px-3 py-1 text-[10px] text-slate-400">Cancel</button>

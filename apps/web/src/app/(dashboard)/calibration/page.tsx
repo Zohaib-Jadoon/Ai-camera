@@ -10,7 +10,7 @@ import { cn } from '@/lib/utils';
 import { useCameras, useUpdateCamera, useTestCameraConnection, Camera } from '@/hooks/use-api';
 
 const SOP_OPTIONS = [
-  { value: '', label: 'Default (General Detection)' },
+  { value: 'general_detection', label: 'Default (General Detection)' },
   { value: 'hardhat_required', label: 'Hardhat Required' },
   { value: 'fire_smoke', label: 'Fire & Smoke Detection' },
   { value: 'weapon_detection', label: 'Weapon Detection' },
@@ -44,7 +44,8 @@ export default function CalibrationPage() {
   };
 
   const handleSopChange = async (camera: Camera, sop: string) => {
-    await updateCamera.mutateAsync({ id: camera.id, sop_name: sop || undefined } as any);
+    const selectedSop = sop || 'general_detection';
+    await updateCamera.mutateAsync({ id: camera.id, sop_name: selectedSop } as any);
   };
 
   return (
@@ -243,12 +244,14 @@ export default function CalibrationPage() {
                           AI Detection Model (SOP)
                         </label>
                         <select
-                          value={camera.sop_name || ''}
+                          value={camera.sop_name && camera.sop_name !== '' ? camera.sop_name : 'general_detection'}
                           onChange={(e) => handleSopChange(camera, e.target.value)}
-                          className="w-full bg-slate-900/60 border border-slate-700/60 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-purple-500/50 transition-colors"
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-purple-500/50 transition-colors"
                         >
                           {SOP_OPTIONS.map((opt) => (
-                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                            <option key={opt.value} value={opt.value} className="bg-slate-900 text-white py-1">
+                              {opt.label}
+                            </option>
                           ))}
                         </select>
                         <p className="text-[10px] text-slate-600 mt-1">
