@@ -113,18 +113,22 @@ class ObjectFilterConfig:
 # These are conservative defaults — operators can override via camera config.
 DEFAULT_OBJECT_FILTERS: dict[str, ObjectFilterConfig] = {
     # People must be at least a small patch; giant boxes (whole-frame) are noise
-    "person":       ObjectFilterConfig(min_area=1_000,  max_area=800_000,  min_ratio=0.1, max_ratio=5.0),
+    "person":       ObjectFilterConfig(min_area=800,   max_area=900_000,  min_ratio=0.1, max_ratio=5.0),
     # Vehicles are wide; exclude portrait-thin detections
     "car":          ObjectFilterConfig(min_area=5_000,  max_area=4_000_000, min_ratio=0.5, max_ratio=10.0),
     "truck":        ObjectFilterConfig(min_area=5_000,  max_area=6_000_000, min_ratio=0.4, max_ratio=12.0),
     "bus":          ObjectFilterConfig(min_area=8_000,  max_area=6_000_000, min_ratio=0.3, max_ratio=8.0),
     "motorcycle":   ObjectFilterConfig(min_area=2_000,  max_area=1_000_000, min_ratio=0.3, max_ratio=4.0),
     "bicycle":      ObjectFilterConfig(min_area=1_500,  max_area=800_000,  min_ratio=0.3, max_ratio=4.0),
-    # Small objects — allow tiny detections but cap at full-frame
-    "backpack":     ObjectFilterConfig(min_area=500,   max_area=200_000),
-    "suitcase":     ObjectFilterConfig(min_area=1_000,  max_area=400_000),
-    "knife":        ObjectFilterConfig(min_area=200,   max_area=100_000,  min_score=0.60),
-    "scissors":     ObjectFilterConfig(min_area=200,   max_area=100_000,  min_score=0.60),
+    # Small threat & handheld objects — low min_score (0.25) for instant detection when held
+    "backpack":     ObjectFilterConfig(min_area=300,   max_area=300_000),
+    "suitcase":     ObjectFilterConfig(min_area=500,   max_area=400_000),
+    "knife":        ObjectFilterConfig(min_area=100,   max_area=150_000,  min_score=0.25),
+    "scissors":     ObjectFilterConfig(min_area=100,   max_area=150_000,  min_score=0.25),
+    "cell phone":   ObjectFilterConfig(min_area=100,   max_area=150_000,  min_score=0.25),
+    "remote":       ObjectFilterConfig(min_area=100,   max_area=150_000,  min_score=0.25),
+    "handgun":      ObjectFilterConfig(min_area=100,   max_area=150_000,  min_score=0.25),
+    "weapon":       ObjectFilterConfig(min_area=100,   max_area=150_000,  min_score=0.25),
     # Animals
     "dog":          ObjectFilterConfig(min_area=800,   max_area=600_000),
     "cat":          ObjectFilterConfig(min_area=500,   max_area=300_000),

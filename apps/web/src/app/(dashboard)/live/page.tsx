@@ -170,10 +170,13 @@ export default function LiveMonitoring() {
     setLastFrameData(prev => ({ ...prev, [camId]: dataUrl }));
   }, []);
 
-  // Real-time camera status updates via WebSocket
+  const [activeThreats, setActiveThreats] = useState<Record<string, boolean>>({});
+
+  // Real-time camera status and threat alert WebSocket listeners
   useEffect(() => {
     const socket = getSocket();
-    const handler = (payload: { camera_id: string; status: string }) => {
+
+    const statusHandler = (payload: { camera_id: string; status: string }) => {
       qc.setQueryData<import('@/hooks/use-api').Camera[]>(['cameras'], (old) => {
         if (!old) return old;
         return old.map((cam) =>
@@ -182,9 +185,51 @@ export default function LiveMonitoring() {
       });
       qc.invalidateQueries({ queryKey: ['cameras'] });
     };
-    socket.on('camera_status', handler);
-    return () => { socket.off('camera_status', handler); };
-  }, [qc]);
+
+    const alertHandler = (payload: any) => {
+      const objType = (payload.object_type || payload.alert_type || '').toUpperCase();
+      const isThreat = objType.includes('INTRUSION') || objType.includes('WEAPON') || objType.includes('KNIFE') || objType.includes('GUN') || objType.includes('FIGHT') || objType.includes('FALL');
+
+      if (isThreat && payload.camera_id) {
+        const camId = payload.camera_id;
+        setActiveThreats(prev => ({ ...prev, [camId]: true }));
+
+        // Play urgent audio siren if unmuted
+        if (!muted && typeof window !== 'undefined') {
+          try {
+            const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+            if (AudioCtx) {
+              const ctx = new AudioCtx();
+              const osc = ctx.createOscillator();
+              const gain = ctx.createGain();
+              osc.type = 'sawtooth';
+              osc.frequency.setValueAtTime(950, ctx.currentTime);
+              osc.frequency.exponentialRampToValueAtTime(1300, ctx.currentTime + 0.25);
+              gain.gain.setValueAtTime(0.2, ctx.currentTime);
+              gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
+              osc.connect(gain);
+              gain.connect(ctx.destination);
+              osc.start();
+              osc.stop(ctx.currentTime + 0.5);
+            }
+          } catch {}
+        }
+
+        // Auto clear red threat highlight after 10 seconds
+        setTimeout(() => {
+          setActiveThreats(prev => ({ ...prev, [camId]: false }));
+        }, 10000);
+      }
+    };
+
+    socket.on('camera_status', statusHandler);
+    socket.on('alert', alertHandler);
+
+    return () => {
+      socket.off('camera_status', statusHandler);
+      socket.off('alert', alertHandler);
+    };
+  }, [qc, muted]);
 
   const { data: cameras = [], isLoading: camsLoading } = useCameras();
   const { data: events = [] } = useDetections(30);
@@ -327,6 +372,7 @@ export default function LiveMonitoring() {
             <AnimatePresence mode="popLayout">
               {cameras.map((cam) => {
                 const isOnline = cam.status === 'ONLINE';
+                const isThreatActive = !!activeThreats[cam.id];
                 const detCount = detectionsByCam[cam.id] ?? 0;
                 return (
                   <motion.div
@@ -337,7 +383,10 @@ export default function LiveMonitoring() {
                     onClick={() => setSelectedCam(cam.id)}
                     className={cn(
                       'relative rounded-2xl overflow-hidden cursor-pointer group transition-all duration-300 flex flex-col',
-                      'border border-slate-800/80 shadow-2xl bg-slate-950',
+                      'border shadow-2xl bg-slate-950',
+                      isThreatActive
+                        ? 'border-red-500 ring-4 ring-red-600/80 animate-pulse shadow-[0_0_50px_rgba(239,68,68,0.8)]'
+                        : 'border-slate-800/80',
                       layout === '1+3' && cam.id === cameras[0]?.id ? 'lg:col-span-3 lg:row-span-2' : '',
                       selectedCam === cam.id ? 'ring-2 ring-blue-500 shadow-blue-500/20' : 'hover:border-slate-700',
                       !isOnline ? 'opacity-70' : ''
@@ -357,7 +406,11 @@ export default function LiveMonitoring() {
                     {/* Top Status & Overlay Header */}
                     <div className="absolute top-3 left-3 right-3 flex items-center justify-between z-40 pointer-events-none">
                       <div className="flex items-center gap-2">
-                        {isOnline ? (
+                        {isThreatActive ? (
+                          <span className="flex items-center gap-1.5 bg-red-600 border border-red-400 text-white text-[10px] font-black px-3 py-1 rounded-md shadow-xl animate-bounce">
+                            <ShieldAlert className="w-3.5 h-3.5" /> ⚠ THREAT DETECTED
+                          </span>
+                        ) : isOnline ? (
                           <span className="flex items-center gap-1.5 bg-red-600/90 backdrop-blur-md border border-red-500/50 text-white text-[10px] font-black px-2.5 py-1 rounded-md shadow-lg shadow-red-600/30">
                             <span className="w-1.5 h-1.5 bg-white rounded-full animate-ping" /> LIVE
                           </span>
