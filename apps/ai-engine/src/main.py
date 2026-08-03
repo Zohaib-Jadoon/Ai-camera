@@ -51,7 +51,7 @@ AI_ENGINE_KEY = os.getenv("AI_ENGINE_KEY", "default-secret-key")
 
 # Shared infrastructure
 model_registry = ModelRegistry()
-detector = Detector(confidence=CONFIDENCE_THRESHOLD)
+detector = Detector(model_name="yolov8s-worldv2.pt", confidence=0.25)
 face_engine = FaceEngine()
 
 # ── Advanced AI modules (shared across all cameras) ─────────────────────────

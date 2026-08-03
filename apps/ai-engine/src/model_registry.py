@@ -69,8 +69,14 @@ class ModelRegistry:
     def resolve(self, sop_name: str | None = None) -> str:
         """
         Return the model path for a given SOP.
-        Falls back to the base yolov8n.pt if SOP not registered.
+        - 'weapon_detection': maps to yolov8s-worldv2.pt (Open-vocabulary gun/handgun/pistol/rifle model)
+        - Registered custom models in registry.json
+        - Base fallback to yolov8n.pt or yolov8s-worldv2.pt
         """
+        if sop_name in ["weapon_detection", "weapon", "fire_smoke", "general_detection"]:
+            if sop_name == "weapon_detection":
+                return "yolov8s-worldv2.pt"
+            
         base = str(MODELS_DIR / "yolov8n.pt") if (MODELS_DIR / "yolov8n.pt").exists() else "yolov8n.pt"
         if sop_name and sop_name in self._data:
             path = self._data[sop_name]["model_path"]

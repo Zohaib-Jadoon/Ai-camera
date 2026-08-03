@@ -220,7 +220,7 @@ export default function LiveMonitoring() {
     const alertHandler = (payload: any) => {
       const objType = (payload.object_type || payload.alert_type || '').toUpperCase();
       const isThreat = ['INTRUSION', 'WEAPON', 'KNIFE', 'GUN', 'FIGHT', 'FALL', 'SCISSORS',
-        'HANDGUN', 'PISTOL', 'RIFLE', 'SWORD', 'AXE', 'BAT', 'CONGESTION', 'TRAFFIC',
+        'HANDGUN', 'PISTOL', 'RIFLE', 'FIREARM', 'SWORD', 'AXE', 'BAT', 'BASEBALL BAT', 'CONGESTION', 'TRAFFIC',
         'WEAPON_DETECTED', 'FIGHT_DETECTED', 'FALL_DETECTED'
       ].some(t => objType.includes(t));
 

@@ -13,8 +13,21 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
+import os
+import pathlib
+import tempfile
 import cv2
 import numpy as np
+
+# Safe weights & config paths for Ultralytics & CLIP downloads
+try:
+    import ultralytics.utils
+    _weights_dir = pathlib.Path.cwd() / '.weights'
+    _weights_dir.mkdir(parents=True, exist_ok=True)
+    ultralytics.utils.WEIGHTS_DIR = _weights_dir
+    os.environ['ULTRALYTICS_CONFIG_DIR'] = str(tempfile.gettempdir())
+except Exception:
+    pass
 
 if TYPE_CHECKING:
     from ultralytics import YOLO
@@ -208,15 +221,30 @@ except ImportError:
     logger.warning("Ultralytics not available — detector running in mock mode")
 
 
-# COCO classes of interest for surveillance
-# Includes standard COCO names plus common aliases used in fine-tuned models.
+# COCO & Open-Vocabulary classes of interest for surveillance & weapon detection
 SURVEILLANCE_CLASSES = {
     'person', 'car', 'motorcycle', 'bus', 'truck',
     'bicycle', 'dog', 'cat', 'bird', 'backpack',
-    'suitcase', 'knife', 'scissors',
-    # Fine-tuned weapon model names
-    'gun', 'handgun', 'pistol', 'rifle', 'weapon', 'sword', 'bat',
+    'suitcase', 'knife', 'scissors', 'cell phone', 'remote',
+    # Threat & weapon class names (COCO + YOLO-World)
+    'gun', 'handgun', 'pistol', 'rifle', 'firearm', 'weapon', 'sword', 'bat', 'baseball bat',
 }
+
+WORLD_PROMPT_CLASSES = [
+    'person', 'gun', 'handgun', 'pistol', 'rifle', 'firearm',
+    'knife', 'scissors', 'weapon', 'sword', 'bat', 'baseball bat',
+    'car', 'motorcycle', 'bus', 'truck', 'bicycle', 'dog', 'cat',
+    'backpack', 'suitcase', 'cell phone'
+]
+
+
+def _setup_world_classes_if_needed(model, model_name: str):
+    if model is not None and 'world' in model_name.lower():
+        try:
+            model.set_classes(WORLD_PROMPT_CLASSES)
+            logger.info(f"YOLO-World open-vocabulary weapon classes set: {WORLD_PROMPT_CLASSES}")
+        except Exception as e:
+            logger.warning(f"Could not set YOLO-World classes: {e}")
 
 
 class Detector:
@@ -237,6 +265,7 @@ class Detector:
             try:
                 logger.info(f"Loading YOLOv8 model: {model_name}")
                 self.model = YOLO(model_name)
+                _setup_world_classes_if_needed(self.model, model_name)
                 self._loaded = True
                 logger.info(f"YOLOv8 model loaded (conf threshold: {confidence})")
             except Exception as e:
@@ -253,6 +282,7 @@ class Detector:
             raise RuntimeError("ultralytics not installed — cannot load model")
         logger.info(f"Hot-swapping YOLO model: {model_name}")
         self.model = YOLO(model_name)
+        _setup_world_classes_if_needed(self.model, model_name)
         self._loaded = True
         logger.info(f"YOLO model hot-swapped to: {model_name}")
 
@@ -279,7 +309,7 @@ class Detector:
                 
             detections = []
             # THREAT classes need lower YOLO conf so the model doesn't suppress them
-            WEAPON_CLASSES = {'knife', 'scissors', 'gun', 'handgun', 'pistol', 'rifle', 'weapon', 'sword', 'bat'}
+            WEAPON_CLASSES = {'knife', 'scissors', 'gun', 'handgun', 'pistol', 'rifle', 'firearm', 'weapon', 'sword', 'bat', 'baseball bat'}
 
             for r in results:
                 boxes = r.boxes
