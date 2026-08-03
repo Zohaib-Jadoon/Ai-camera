@@ -576,9 +576,7 @@ async def process_camera(camera: dict):
     try:
         while True:
             try:
-                # ── Camera status heartbeat ─────────────────────────────────────
-                # Emit camera_status ONLINE/OFFLINE so the backend can keep the DB
-                # in sync.  We emit on every transition AND on a periodic heartbeat.
+                # ── Camera status heartbeat ──────────────────────────────────────
                 now = time.monotonic()
                 current_status = "ONLINE" if stream.is_online else "OFFLINE"
                 if current_status != last_status or (now - last_status_report) >= status_report_interval:
@@ -590,401 +588,305 @@ async def process_camera(camera: dict):
                     last_status = current_status
                     last_status_report = now
 
-                # ── Skip inference when stream is offline ───────────────────────
+                # ── Skip inference when stream is offline ────────────────────────
                 if not stream.is_online:
-                    motion.calibrating = True  # reset background model baseline on reconnect
+                    motion.calibrating = True
                     await asyncio.sleep(1)
                     continue
 
                 frame = stream.get_frame()
 
+                # ── Privacy masks: black-out sensitive regions ───────────────────
+                if privacy_masks:
+                    import cv2 as _cv2_mask
+                    fh, fw = frame.shape[:2]
+                    frame = frame.copy()
+                    for m in privacy_masks:
+                        try:
+                            mx = int(m['x'] * fw); my = int(m['y'] * fh)
+                            mw = int(m['width'] * fw); mh = int(m['height'] * fh)
+                            frame[my:my+mh, mx:mx+mw] = 0
+                        except (KeyError, TypeError, ValueError):
+                            pass
 
-            # ── 🐦 Privacy masks (Frigate): black-out sensitive regions ────────
-            # Applied before YOLO and FaceEngine so masked areas are never inferred.
-            if privacy_masks:
-                import cv2 as _cv2_mask
+                # ── Motion gating ────────────────────────────────────────────────
+                import cv2 as _cv2_motion
+                gray_for_motion = _cv2_motion.cvtColor(frame, _cv2_motion.COLOR_BGR2GRAY)
+                if not _motion_initialized:
+                    fh_m, fw_m = gray_for_motion.shape[:2]
+                    motion.__init__(frame_shape=(fh_m, fw_m))
+                    _motion_initialized = True
+
+                motion_boxes = motion.detect(gray_for_motion)
+                if not motion_boxes and not _last_frame_had_threat:
+                    await asyncio.sleep(0.033)
+                    continue
+
+                # ── YOLO inference at 640px ──────────────────────────────────────
                 fh, fw = frame.shape[:2]
-                frame = frame.copy()
-                for m in privacy_masks:
-                    try:
-                        mx = int(m['x'] * fw)
-                        my = int(m['y'] * fh)
-                        mw = int(m['width'] * fw)
-                        mh = int(m['height'] * fh)
-                        frame[my:my+mh, mx:mx+mw] = 0
-                    except (KeyError, TypeError, ValueError):
-                        pass  # malformed mask — skip safely
+                yolo_w = 640
+                yolo_h = int(fh * (yolo_w / fw))
+                import cv2 as _cv2_yolo
+                resized_frame = _cv2_yolo.resize(frame, (yolo_w, yolo_h))
 
-            # ── Motion gating (Frigate-inspired) ────────────────────────────
-            # Only run expensive YOLO inference when pixels actually changed.
-            # Reduces CPU 60-80% on static/idle scenes.
-            import cv2 as _cv2_motion
-            gray_for_motion = _cv2_motion.cvtColor(frame, _cv2_motion.COLOR_BGR2GRAY)
+                raw_detections = await loop.run_in_executor(
+                    None, detector.detect, resized_frame
+                )
 
-            # Lazy-reinit MotionDetector with real frame shape on first frame
-            if not _motion_initialized:
-                fh_m, fw_m = gray_for_motion.shape[:2]
-                motion.__init__(frame_shape=(fh_m, fw_m))
-                _motion_initialized = True
+                # Map boxes back to original resolution
+                scale_x = fw / yolo_w
+                scale_y = fh / yolo_h
+                for d in raw_detections:
+                    if 'box' in d:
+                        x1, y1, x2, y2 = d['box']
+                        d['box'] = [int(x1*scale_x), int(y1*scale_y), int(x2*scale_x), int(y2*scale_y)]
 
-            motion_boxes = motion.detect(gray_for_motion)
-            if not motion_boxes and not _last_frame_had_threat:
-                # Skip YOLO inference — no motion AND no active threat track
-                await asyncio.sleep(0.033)  # yield at ~30fps cadence
-                continue
+                tracked = tracker.update(raw_detections)
 
-            # Rescaling YOLO inference to 640px wide for 3-5x speedup on CPU
-            fh, fw = frame.shape[:2]
-            yolo_w = 640
-            yolo_h = int(fh * (yolo_w / fw))
-            import cv2 as _cv2_yolo
-            resized_frame = _cv2_yolo.resize(frame, (yolo_w, yolo_h))
+                # ── Stationary motion classification ─────────────────────────────
+                active_track_ids: set[str] = set()
+                visible_tracked: list[dict] = []
+                for det in tracked:
+                    tid = det.get("track_id", "")
+                    active_track_ids.add(tid)
+                    motionless = det.get("motionless_count", 0)
+                    thresh = get_stationary_threshold(det["object_type"])
 
-            raw_detections = await loop.run_in_executor(
-                None, detector.detect, resized_frame
-            )
-
-            # Map detections back to original resolution coordinates
-            scale_x = fw / yolo_w
-            scale_y = fh / yolo_h
-            for d in raw_detections:
-                if 'box' in d:
-                    x1, y1, x2, y2 = d['box']
-                    d['box'] = [int(x1 * scale_x), int(y1 * scale_y), int(x2 * scale_x), int(y2 * scale_y)]
-
-            tracked = tracker.update(raw_detections)
-
-            # ── Frigate Phase-3: stationary motion classification ────────────
-            # For each track that has been motionless for STATIONARY_FRAMES
-            # frames, use appearance-based NCC + phase-correlation to decide
-            # whether the object truly moved or if the detection is just jitter.
-            # Tracks confirmed stationary are omitted from the detection emit
-            # so the backend doesn't receive a flood of redundant events.
-            active_track_ids: set[str] = set()
-            visible_tracked: list[dict] = []
-            for det in tracked:
-                tid = det.get("track_id", "")
-                active_track_ids.add(tid)
-                motionless = det.get("motionless_count", 0)  # provided by CentroidTracker
-                thresh = get_stationary_threshold(det["object_type"])
-
-                if thresh.motion_classifier_enabled and motionless >= STATIONARY_FRAMES:
-                    # First time crossing the threshold: set anchor
-                    _sb = det["smooth_box"] if "smooth_box" in det else det["box"]
-                    median_box: tuple[int, int, int, int] = (int(_sb[0]), int(_sb[1]), int(_sb[2]), int(_sb[3]))
-                    stationary_classifier.ensure_anchor(tid, frame, median_box)
-                    # Subsequent frames: evaluate whether object has truly moved
-                    _rb = det["box"]
-                    raw_box: tuple[int, int, int, int] = (int(_rb[0]), int(_rb[1]), int(_rb[2]), int(_rb[3]))
-                    keep_stationary = stationary_classifier.evaluate(tid, frame, raw_box)
-                    if keep_stationary:
-                        continue  # suppress this re-detection — object hasn't moved
-                    else:
-                        # Genuine movement — reset classifier so anchor refreshes
+                    if thresh.motion_classifier_enabled and motionless >= STATIONARY_FRAMES:
+                        _sb = det.get("smooth_box", det["box"])
+                        median_box = (int(_sb[0]), int(_sb[1]), int(_sb[2]), int(_sb[3]))
+                        stationary_classifier.ensure_anchor(tid, frame, median_box)
+                        _rb = det["box"]
+                        raw_box = (int(_rb[0]), int(_rb[1]), int(_rb[2]), int(_rb[3]))
+                        if stationary_classifier.evaluate(tid, frame, raw_box):
+                            continue
                         stationary_classifier.on_active(tid)
 
-                # Attach cached face recognition person_name to person detection
-                if det.get("object_type") in ["person", "face"]:
-                    tid = det.get("track_id")
-                    if tid and tid in known_track_names:
-                        det["person_name"] = known_track_names[tid]
-                    elif known_track_names:
-                        det["person_name"] = list(known_track_names.values())[-1]
+                    # Attach cached face recognition name
+                    if det.get("object_type") in ["person", "face"]:
+                        _tid = det.get("track_id")
+                        if _tid and _tid in known_track_names:
+                            det["person_name"] = known_track_names[_tid]
+                        elif known_track_names:
+                            det["person_name"] = list(known_track_names.values())[-1]
 
-                visible_tracked.append(det)
+                    visible_tracked.append(det)
 
-            # ── Detect if this frame contains any threat-class objects ──────
-            frame_threats = [d for d in visible_tracked if d.get('object_type', '').lower() in THREAT_CLASSES]
-            _last_frame_had_threat = bool(frame_threats)
+                # ── Threat detection ─────────────────────────────────────────────
+                frame_threats = [d for d in visible_tracked
+                                 if d.get('object_type', '').lower() in THREAT_CLASSES]
+                _last_frame_had_threat = bool(frame_threats)
 
-            # Clean up state for tracks the CentroidTracker has pruned
-            stationary_classifier.cleanup(active_track_ids)
+                stationary_classifier.cleanup(active_track_ids)
 
-            # Collect training data if enabled (also offloaded — cv2.imwrite is slow)
-            await loop.run_in_executor(None, collector.record, frame, raw_detections)
+                # Training data collector (offloaded)
+                await loop.run_in_executor(None, collector.record, frame, raw_detections)
 
-            for det in visible_tracked:
-                payload = {
-                    "camera_id": camera_id,
-                    "object_type": det["object_type"],
-                    "confidence": float(det["confidence"]),
-                    "track_id": det.get("track_id"),
-                    "box": det.get("smooth_box", det.get("box")),  # Frigate: smooth box for UI
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
-                # Emit detection event
+                # ── Emit detections ──────────────────────────────────────────────
                 if sio.connected:
-                    await sio.emit("detection", payload)
+                    for det in visible_tracked:
+                        await sio.emit("detection", {
+                            "camera_id": camera_id,
+                            "object_type": det["object_type"],
+                            "confidence": float(det["confidence"]),
+                            "track_id": det.get("track_id"),
+                            "box": det.get("smooth_box", det.get("box")),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        })
 
-            # ── Instant Threat Alert — emitted independently of detection flood ──
-            for threat_det in frame_threats:
-                threat_type = threat_det.get('object_type', 'weapon').upper()
-                threat_payload = {
-                    "camera_id": camera_id,
-                    "alert_type": f"WEAPON_DETECTED",
-                    "object_type": threat_type,
-                    "confidence": float(threat_det.get('confidence', 0)),
-                    "box": threat_det.get('smooth_box', threat_det.get('box')),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "severity": "CRITICAL",
-                    "message": f"⚠️ WEAPON DETECTED: {threat_type} on camera {camera_id}",
-                }
+                # ── Instant threat alerts ────────────────────────────────────────
                 if sio.connected:
-                    await sio.emit("threat_alert", threat_payload)
-                    logger.warning(f"THREAT ALERT: {threat_type} detected on camera {camera_id}")
+                    for threat_det in frame_threats:
+                        threat_type = threat_det.get('object_type', 'weapon').upper()
+                        await sio.emit("threat_alert", {
+                            "camera_id": camera_id,
+                            "alert_type": "WEAPON_DETECTED",
+                            "object_type": threat_type,
+                            "confidence": float(threat_det.get('confidence', 0)),
+                            "box": threat_det.get('smooth_box', threat_det.get('box')),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "severity": "CRITICAL",
+                            "message": f"⚠️ WEAPON DETECTED: {threat_type} on camera {camera_id}",
+                        })
+                        logger.warning(f"THREAT ALERT: {threat_type} on camera {camera_id}")
 
-            # 🐦 Frigate recording: emit start_recording when detections fire
-            if visible_tracked and sio.connected:
-                await sio.emit("start_recording", {
-                    "camera_id": camera_id,
-                    "duration_sec": 30,
-                    "trigger": visible_tracked[0]["object_type"],
-                    "record_url": record_url,
-                })
-
-            # Intrusion detection — pass frame dims so normalised canvas
-            # coordinates are correctly scaled to pixel space (Frigate approach).
-            # Use smooth_box (percentile-stabilised) as the 'box' key so zone
-            # checks don't fire on detection jitter near zone boundaries.
-            fh, fw = frame.shape[:2]
-            tracked_for_intrusion = [
-                {**d, "box": d.get("smooth_box", d.get("box"))} for d in visible_tracked
-            ]
-            intrusions = intrusion_detector.check(tracked_for_intrusion, frame_width=fw, frame_height=fh)
-            for intr in intrusions:
-                if sio.connected:
-                    await sio.emit("intrusion", {
-                        "camera_id":  camera_id,
-                        "zone_id":    intr.get("zone_id"),
-                        "zone_name":  intr.get("zone_name"),
-                        "rule_type":  intr.get("rule_type"),
-                        "object_type": intr["object_type"],
-                        "confidence": float(intr.get("confidence", 0)),
-                        "timestamp":  datetime.now(timezone.utc).isoformat(),
+                # Trigger clip recording
+                if visible_tracked and sio.connected:
+                    await sio.emit("start_recording", {
+                        "camera_id": camera_id,
+                        "duration_sec": 30,
+                        "trigger": visible_tracked[0]["object_type"],
+                        "record_url": record_url,
                     })
 
-            # Face recognition (every 5th frame — offloaded, CPU-bound)
-            if stream.frame_count % 5 == 0:
-                faces = await loop.run_in_executor(
-                    None, face_engine.process, frame
-                )
-                for face in faces:
-                    if face.get("is_known") and face.get("person_name"):
-                        p_name = face["person_name"]
-                        # Attach recognized name to display tracking list & track cache
-                        for det in visible_tracked:
-                            if det.get("object_type") in ["person", "face"]:
-                                det["person_name"] = p_name
-                                tid = det.get("track_id")
-                                if tid:
-                                    known_track_names[tid] = p_name
+                # ── Intrusion detection ──────────────────────────────────────────
+                tracked_for_intrusion = [
+                    {**d, "box": d.get("smooth_box", d.get("box"))} for d in visible_tracked
+                ]
+                intrusions = intrusion_detector.check(tracked_for_intrusion, frame_width=fw, frame_height=fh)
+                for intr in intrusions:
+                    if sio.connected:
+                        await sio.emit("intrusion", {
+                            "camera_id":   camera_id, "zone_id": intr.get("zone_id"),
+                            "zone_name":   intr.get("zone_name"), "rule_type": intr.get("rule_type"),
+                            "object_type": intr["object_type"], "confidence": float(intr.get("confidence", 0)),
+                            "timestamp":   datetime.now(timezone.utc).isoformat(),
+                        })
 
-                        # Add face bounding box to display overlay
-                        if face.get("bbox"):
-                            visible_tracked.append({
-                                "object_type": "face",
-                                "person_name": p_name,
-                                "confidence": face.get("confidence", 0.95),
-                                "box": face["bbox"],
+                # ── Face recognition (every 5th AI frame) ───────────────────────
+                if stream.frame_count % 5 == 0:
+                    faces = await loop.run_in_executor(None, face_engine.process, frame)
+                    for face in faces:
+                        if face.get("is_known") and face.get("person_name"):
+                            p_name = face["person_name"]
+                            for det in visible_tracked:
+                                if det.get("object_type") in ["person", "face"]:
+                                    det["person_name"] = p_name
+                                    _tid2 = det.get("track_id")
+                                    if _tid2:
+                                        known_track_names[_tid2] = p_name
+                            if face.get("bbox"):
+                                visible_tracked.append({
+                                    "object_type": "face", "person_name": p_name,
+                                    "confidence": face.get("confidence", 0.95), "box": face["bbox"],
+                                })
+                        if sio.connected:
+                            await sio.emit("face_event", {
+                                "camera_id": camera_id, "person_id": face.get("person_id"),
+                                "person_name": face.get("person_name"), "is_known": face["is_known"],
+                                "confidence": float(face["confidence"]),
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
                             })
 
-                    if sio.connected:
-                        await sio.emit("face_event", {
-                            "camera_id": camera_id,
-                            "person_id": face.get("person_id"),
-                            "person_name": face.get("person_name"),
-                            "is_known": face["is_known"],
-                            "confidence": float(face["confidence"]),
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        })
+                # ── Traffic congestion ───────────────────────────────────────────
+                if zones and visible_tracked:
+                    for evt in congestion_detector.analyze(visible_tracked, zones, fw, fh):
+                        if sio.connected:
+                            await sio.emit("congestion", {
+                                "camera_id": camera_id, "zone_id": evt["zone_id"],
+                                "zone_name": evt["zone_name"], "vehicle_count": evt["vehicle_count"],
+                                "level": evt["level"], "timestamp": datetime.now(timezone.utc).isoformat(),
+                            })
 
-            # ── Advanced AI Analytics ────────────────────────────────────────
+                # ── Speed estimation ─────────────────────────────────────────────
+                if visible_tracked:
+                    for evt in speed_estimator.update(visible_tracked):
+                        if sio.connected:
+                            await sio.emit("speed_violation", {
+                                "camera_id": camera_id, "track_id": evt["track_id"],
+                                "object_type": evt["object_type"], "speed_kmh": evt["speed_kmh"],
+                                "speed_mph": evt["speed_mph"], "timestamp": datetime.now(timezone.utc).isoformat(),
+                            })
 
-            # 1. Traffic Congestion Detection
-            if zones and visible_tracked:
-                congestion_events = congestion_detector.analyze(
-                    visible_tracked, zones, fw, fh
-                )
-                for evt in congestion_events:
-                    if sio.connected:
-                        await sio.emit("congestion", {
-                            "camera_id": camera_id,
-                            "zone_id": evt["zone_id"],
-                            "zone_name": evt["zone_name"],
-                            "vehicle_count": evt["vehicle_count"],
-                            "level": evt["level"],
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        })
+                # ── Wrong-way detection ──────────────────────────────────────────
+                if visible_tracked:
+                    for evt in wrongway_detector.check(visible_tracked, fw, fh):
+                        if sio.connected:
+                            await sio.emit("wrong_way", {
+                                "camera_id": camera_id, "track_id": evt["track_id"],
+                                "object_type": evt["object_type"], "line_id": evt["line_id"],
+                                "line_name": evt["line_name"], "timestamp": datetime.now(timezone.utc).isoformat(),
+                            })
 
-            # 2. Speed Estimation
-            if visible_tracked:
-                speed_events = speed_estimator.update(visible_tracked)
-                for evt in speed_events:
-                    if sio.connected:
-                        await sio.emit("speed_violation", {
-                            "camera_id": camera_id,
-                            "track_id": evt["track_id"],
-                            "object_type": evt["object_type"],
-                            "speed_kmh": evt["speed_kmh"],
-                            "speed_mph": evt["speed_mph"],
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        })
+                # ── Fall detection ───────────────────────────────────────────────
+                if visible_tracked:
+                    for evt in fall_detector.analyze(visible_tracked):
+                        if sio.connected:
+                            fp = {"camera_id": camera_id, "track_id": evt["track_id"],
+                                  "event_type": "FALL_DETECTED", "confidence": float(evt.get("confidence", 0)),
+                                  "timestamp": datetime.now(timezone.utc).isoformat()}
+                            await sio.emit("safety_event", fp)
+                            await sio.emit("threat_alert", {**fp, "object_type": "FALL_DETECTED",
+                                           "alert_type": "FALL_DETECTED", "severity": "HIGH",
+                                           "message": f"⚠️ PERSON FALLEN on camera {camera_id}"})
+                            logger.warning(f"FALL DETECTED on camera {camera_id}")
 
-            # 3. Wrong-way Detection
-            if visible_tracked:
-                wrongway_events = wrongway_detector.check(visible_tracked, fw, fh)
-                for evt in wrongway_events:
-                    if sio.connected:
-                        await sio.emit("wrong_way", {
-                            "camera_id": camera_id,
-                            "track_id": evt["track_id"],
-                            "object_type": evt["object_type"],
-                            "line_id": evt["line_id"],
-                            "line_name": evt["line_name"],
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        })
+                # ── Fight detection ──────────────────────────────────────────────
+                if visible_tracked:
+                    for evt in fight_detector.analyze(visible_tracked):
+                        if sio.connected:
+                            fgt = {"camera_id": camera_id, "track_ids": evt["track_ids"],
+                                   "event_type": "FIGHT_DETECTED", "confidence": float(evt.get("confidence", 0)),
+                                   "proximity_px": evt.get("proximity_px"),
+                                   "timestamp": datetime.now(timezone.utc).isoformat()}
+                            await sio.emit("safety_event", fgt)
+                            await sio.emit("threat_alert", {**fgt, "object_type": "FIGHT_DETECTED",
+                                           "alert_type": "FIGHT_DETECTED", "severity": "CRITICAL",
+                                           "message": f"⚠️ FIGHT DETECTED on camera {camera_id}"})
+                            logger.warning(f"FIGHT DETECTED on camera {camera_id}")
 
-            # 4. Fall Detection (requires pose keypoints)
-            if visible_tracked:
-                fall_events = fall_detector.analyze(visible_tracked)
-                for evt in fall_events:
-                    if sio.connected:
-                        fall_payload = {
-                            "camera_id": camera_id,
-                            "track_id": evt["track_id"],
-                            "event_type": "FALL_DETECTED",
-                            "confidence": float(evt.get("confidence", 0)),
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        }
-                        await sio.emit("safety_event", fall_payload)
-                        # Also emit threat_alert so frontend triggers red flash + siren
-                        await sio.emit("threat_alert", {
-                            **fall_payload,
-                            "object_type": "FALL_DETECTED",
-                            "alert_type": "FALL_DETECTED",
-                            "severity": "HIGH",
-                            "message": f"⚠️ PERSON FALLEN on camera {camera_id}",
-                        })
-                        logger.warning(f"FALL DETECTED on camera {camera_id}")
+                # ── PPE compliance ───────────────────────────────────────────────
+                if visible_tracked:
+                    for evt in await loop.run_in_executor(None, ppe_detector.analyze, visible_tracked, frame):
+                        if sio.connected:
+                            await sio.emit("safety_event", {
+                                "camera_id": camera_id, "track_id": evt["track_id"],
+                                "event_type": "PPE_VIOLATION", "violations": evt.get("violations", []),
+                                "confidence": float(evt.get("confidence", 0)),
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            })
 
-            # 5. Fight Detection (requires pose keypoints)
-            if visible_tracked:
-                fight_events = fight_detector.analyze(visible_tracked)
-                for evt in fight_events:
-                    if sio.connected:
-                        fight_payload = {
-                            "camera_id": camera_id,
-                            "track_ids": evt["track_ids"],
-                            "event_type": "FIGHT_DETECTED",
-                            "confidence": float(evt.get("confidence", 0)),
-                            "proximity_px": evt.get("proximity_px"),
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        }
-                        await sio.emit("safety_event", fight_payload)
-                        # Also emit threat_alert so frontend triggers red flash + siren
-                        await sio.emit("threat_alert", {
-                            **fight_payload,
-                            "object_type": "FIGHT_DETECTED",
-                            "alert_type": "FIGHT_DETECTED",
-                            "severity": "CRITICAL",
-                            "message": f"⚠️ FIGHT DETECTED on camera {camera_id}",
-                        })
-                        logger.warning(f"FIGHT DETECTED on camera {camera_id}")
+                # ── LPR ──────────────────────────────────────────────────────────
+                if visible_tracked:
+                    for evt in await loop.run_in_executor(None, lpr_engine.process, visible_tracked, frame):
+                        if sio.connected:
+                            await sio.emit("plate_detected", {
+                                "camera_id": camera_id, "track_id": evt["track_id"],
+                                "object_type": evt["object_type"], "plate_text": evt["plate_text"],
+                                "plate_confidence": evt["plate_confidence"],
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            })
 
-            # 6. PPE Compliance (requires pose keypoints + frame)
-            if visible_tracked:
-                ppe_events = await loop.run_in_executor(
-                    None, ppe_detector.analyze, visible_tracked, frame
-                )
-                for evt in ppe_events:
-                    if sio.connected:
-                        await sio.emit("safety_event", {
-                            "camera_id": camera_id,
-                            "track_id": evt["track_id"],
-                            "event_type": "PPE_VIOLATION",
-                            "violations": evt.get("violations", []),
-                            "confidence": float(evt.get("confidence", 0)),
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        })
+                # ── Cross-camera ReID ────────────────────────────────────────────
+                if visible_tracked:
+                    for evt in await loop.run_in_executor(None, reid_engine.process, visible_tracked, frame, camera_id):
+                        if sio.connected:
+                            await sio.emit("reid_match", {
+                                "camera_id": camera_id, "track_id": evt["track_id"],
+                                "global_id": evt["global_id"], "matched_camera": evt["matched_camera"],
+                                "similarity": evt["similarity"], "sighting_count": evt.get("sighting_count", 0),
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            })
 
-            # 7. License Plate Recognition (offloaded — OCR is slow)
-            if visible_tracked:
-                lpr_events = await loop.run_in_executor(
-                    None, lpr_engine.process, visible_tracked, frame
-                )
-                for evt in lpr_events:
-                    if sio.connected:
-                        await sio.emit("plate_detected", {
-                            "camera_id": camera_id,
-                            "track_id": evt["track_id"],
-                            "object_type": evt["object_type"],
-                            "plate_text": evt["plate_text"],
-                            "plate_confidence": evt["plate_confidence"],
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        })
+                # ── CLIP frame indexing ──────────────────────────────────────────
+                if stream.frame_count % 15 == 0:
+                    await loop.run_in_executor(None, clip_search.index_frame, frame, camera_id, raw_detections)
 
-            # 8. Cross-Camera ReID (offloaded)
-            if visible_tracked:
-                reid_events = await loop.run_in_executor(
-                    None, reid_engine.process, visible_tracked, frame, camera_id
-                )
-                for evt in reid_events:
-                    if sio.connected:
-                        await sio.emit("reid_match", {
-                            "camera_id": camera_id,
-                            "track_id": evt["track_id"],
-                            "global_id": evt["global_id"],
-                            "matched_camera": evt["matched_camera"],
-                            "similarity": evt["similarity"],
-                            "sighting_count": evt.get("sighting_count", 0),
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        })
-
-            # 9. CLIP Frame Indexing (for natural language search)
-            if stream.frame_count % 15 == 0:  # Index every ~0.5s at 30fps
-                await loop.run_in_executor(
-                    None, clip_search.index_frame, frame, camera_id, raw_detections
-                )
-
-            # 10. Predictive Forecasting — record events for pattern analysis
-            if visible_tracked:
+                # ── Predictive forecasting ───────────────────────────────────────
+                # FIXED: record_event(camera_id, object_type, count=1) has no 'confidence' kwarg
                 for det in visible_tracked:
                     forecast_engine.record_event(
                         camera_id=camera_id,
                         object_type=det.get("object_type", "unknown"),
-                        confidence=float(det.get("confidence", 0)),
                     )
 
-            # Update last_tracked_for_display so the 15 FPS video stream encoder
-            # receives current bounding boxes and person name labels on every frame!
-            last_tracked_for_display = [d.copy() for d in visible_tracked]
-            active_track_str = active_track_ids
-            speed_estimator.cleanup(active_track_str)
-            wrongway_detector.cleanup(active_track_str)
-            fall_detector.cleanup(active_track_str)
-            lpr_engine.cleanup(active_track_str)
-            reid_engine.cleanup(active_track_str, camera_id)
+                # Update display overlay for stream publisher (shallow copy, not reference)
+                last_tracked_for_display = list(visible_tracked)
 
-            # Update tracked detections for early decoupled frame emitter
-            last_tracked_for_display = visible_tracked
+                speed_estimator.cleanup(active_track_ids)
+                wrongway_detector.cleanup(active_track_ids)
+                fall_detector.cleanup(active_track_ids)
+                lpr_engine.cleanup(active_track_ids)
+                reid_engine.cleanup(active_track_ids, camera_id)
 
-            consecutive_errors = 0
-            await asyncio.sleep(0)  # yield to event loop between frames
-
-        except asyncio.CancelledError:
-            logger.info(f"Camera {camera_id}: processing cancelled")
-            break
-        except Exception as e:
-            consecutive_errors += 1
-            logger.error(f"Camera {camera_id}: processing error #{consecutive_errors}: {e}")
-            if consecutive_errors >= max_errors:
-                logger.critical(f"Camera {camera_id}: too many errors, pausing 30s")
-                await asyncio.sleep(30)
                 consecutive_errors = 0
-            else:
-                await asyncio.sleep(1)
+                # Yield 1ms so stream publisher + socket IO can fire between inferences
+                await asyncio.sleep(0.001)
 
-    stream.stop()
+            except asyncio.CancelledError:
+                logger.info(f"Camera {camera_id}: processing cancelled")
+                break
+            except Exception as e:
+                consecutive_errors += 1
+                logger.error(f"Camera {camera_id}: processing error #{consecutive_errors}: {e}")
+                if consecutive_errors >= max_errors:
+                    logger.critical(f"Camera {camera_id}: too many errors, pausing 30s")
+                    await asyncio.sleep(30)
+                    consecutive_errors = 0
+                else:
+                    await asyncio.sleep(1)
+    finally:
+        stream.stop()
 
 
 async def main():
