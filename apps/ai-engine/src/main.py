@@ -486,13 +486,15 @@ async def process_camera(camera: dict):
     status_report_interval = 5     # emit status every N seconds (5s for responsive UI)
     last_status_report = 0.0
     last_frame_emit = 0.0          # wall-clock time of last frame emit
-    _FRAME_INTERVAL = 1.0 / 15    # target 15 FPS for live display
+    _FRAME_INTERVAL = 1.0 / 30    # target 30 FPS for live display
     last_tracked_for_display: list = []  # latest detections for annotation
 
     loop = asyncio.get_event_loop()
 
     # Shared JPEG encoder — runs in executor, decoupled from detection loop
     def _encode_and_emit_frame(f, dets):
+        if f is None or f.size == 0:
+            return None
         import base64 as _b64
         import cv2 as _cv2e
         annotated = f.copy()
@@ -531,12 +533,12 @@ async def process_camera(camera: dict):
                 _cv2e.putText(annotated, label, (x1 + 6, banner_y2 - 6),
                               _cv2e.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), font_thick, _cv2e.LINE_AA)
 
-        # Resize to 854px wide for bandwidth
+        # Resize to 640px wide for high-speed encoding and 30 FPS bandwidth
         h, w = annotated.shape[:2]
-        if w > 854:
-            scale = 854 / w
-            annotated = _cv2e.resize(annotated, (854, int(h * scale)))
-        ok, buf = _cv2e.imencode('.jpg', annotated, [_cv2e.IMWRITE_JPEG_QUALITY, 55])
+        if w > 640:
+            scale = 640 / w
+            annotated = _cv2e.resize(annotated, (640, int(h * scale)))
+        ok, buf = _cv2e.imencode('.jpg', annotated, [_cv2e.IMWRITE_JPEG_QUALITY, 50])
         if not ok:
             return None
         return _b64.b64encode(buf).decode('utf-8')

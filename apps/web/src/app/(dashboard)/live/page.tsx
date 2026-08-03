@@ -46,8 +46,9 @@ function CameraFeed({
   isZoomed: boolean;
   onFrameUpdate?: (cameraId: string, dataUrl: string) => void;
 }) {
-  const [frameSrc, setFrameSrc] = useState<string | null>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
   const [hasFrame, setHasFrame] = useState(false);
+  const hasFrameRef = useRef(false);
   const [fps, setFps] = useState<number>(0);
   const frameCountRef = useRef<number>(0);
   const lastFpsCalcRef = useRef<number>(Date.now());
@@ -59,13 +60,12 @@ function CameraFeed({
 
   useEffect(() => {
     if (!isOnline) {
-      setFrameSrc(null);
       setHasFrame(false);
+      hasFrameRef.current = false;
       return;
     }
 
     const socket = getSocket();
-    setHasFrame(false);
 
     const joinRoom = () => {
       socket.emit('join-camera', cameraId);
@@ -79,8 +79,15 @@ function CameraFeed({
     const onFrame = (payload: { camera_id: string; data: string }) => {
       if (payload.camera_id !== cameraId) return;
       const dataUrl = `data:image/jpeg;base64,${payload.data}`;
-      setFrameSrc(dataUrl);
-      setHasFrame(true);
+
+      if (imgRef.current) {
+        imgRef.current.src = dataUrl;
+      }
+      if (!hasFrameRef.current) {
+        hasFrameRef.current = true;
+        setHasFrame(true);
+      }
+
       if (onFrameUpdateRef.current) {
         onFrameUpdateRef.current(cameraId, dataUrl);
       }
@@ -118,27 +125,25 @@ function CameraFeed({
     );
   }
 
-  if (!hasFrame) {
-    return (
-      <div className="flex flex-col items-center gap-3 text-slate-400 p-6 text-center">
-        <Loader2 className="w-9 h-9 animate-spin text-blue-400/80" />
-        <div className="flex flex-col gap-1">
-          <span className="text-xs font-bold uppercase tracking-wider text-slate-300">Connecting Feed...</span>
-          <span className="text-[11px] text-slate-500">Waiting for live video frames</span>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <>
+      {!hasFrame && (
+        <div className="flex flex-col items-center gap-3 text-slate-400 p-6 text-center absolute inset-0 justify-center z-10">
+          <Loader2 className="w-9 h-9 animate-spin text-blue-400/80" />
+          <div className="flex flex-col gap-1">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-300">Connecting Feed...</span>
+            <span className="text-[11px] text-slate-500">Waiting for live video frames</span>
+          </div>
+        </div>
+      )}
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
-        src={frameSrc!}
+        ref={imgRef}
         alt="Live camera feed"
         className={cn(
           "absolute inset-0 w-full h-full object-cover transition-transform duration-300",
-          isZoomed ? "scale-150 z-20" : "scale-100"
+          isZoomed ? "scale-150 z-20" : "scale-100",
+          !hasFrame ? "opacity-0" : "opacity-100"
         )}
       />
       {/* Subtle scan line effect */}

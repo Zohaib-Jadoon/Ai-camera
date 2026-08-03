@@ -111,8 +111,9 @@ export class AlertsService {
       ...data,
       severity,
     };
+    const { object_type, rule_type, ...validAlertData } = alertData as any;
     try {
-      const alert = await this.prisma.alert.create({ data: alertData });
+      const alert = await this.prisma.alert.create({ data: validAlertData });
       await this.cache.del(ACTIVE_COUNT_KEY);
       await this.cache.del('analytics:summary');
       await this.cache.del('analytics:hourly');

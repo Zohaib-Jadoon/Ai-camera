@@ -158,18 +158,18 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
         timestamp: new Date(payload.timestamp),
       });
 
-      // Custom alert for known persons with alert_enabled
-      if (payload.is_known && payload.person_id && payload.alert_enabled) {
-        const alertMessage = payload.alert_message || `Known person detected: ${payload.person_name || 'Unknown'}`;
+      // Custom alert for known persons
+      if (payload.is_known && payload.person_name) {
+        const alertMessage = payload.alert_message || `Person Identified: ${payload.person_name}`;
         try {
           await this.alertsService.create({
-            event_id: `face-${payload.person_id}-${Date.now()}`,
+            event_id: `face-${payload.person_id || payload.person_name}-${Date.now()}`,
             alert_type: 'KNOWN_FACE_ARRIVAL',
             camera_id: payload.camera_id,
             object_type: 'KNOWN_FACE',
-            rule_type: payload.person_name || 'known_face',
+            rule_type: payload.person_name,
           });
-          // Also emit a specific notification for real-time UI toast
+          // Emit specific notification for real-time UI toast
           this.server.emit('person_alert', {
             person_id: payload.person_id,
             person_name: payload.person_name,
