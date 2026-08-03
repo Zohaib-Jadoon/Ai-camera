@@ -44,7 +44,7 @@ class FaceEngine:
                 root = os.getenv("INSIGHTFACE_ROOT", os.path.expanduser("~/.insightface"))
                 ctx_id = int(os.getenv("INSIGHTFACE_CTX_ID", "0" if has_cuda else "-1"))
                 self.app = FaceAnalysis(name="buffalo_l", root=root)
-                self.app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+                self.app.prepare(ctx_id=ctx_id, det_size=(320, 320))
                 self._loaded = True
                 logger.info(f"InsightFace (buffalo_l) loaded successfully (ctx_id={ctx_id})")
             except Exception as e:

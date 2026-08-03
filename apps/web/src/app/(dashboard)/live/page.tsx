@@ -88,10 +88,6 @@ function CameraFeed({
         setHasFrame(true);
       }
 
-      if (onFrameUpdateRef.current) {
-        onFrameUpdateRef.current(cameraId, dataUrl);
-      }
-
       // Calculate live FPS
       frameCountRef.current += 1;
       const now = Date.now();
@@ -167,14 +163,6 @@ export default function LiveMonitoring() {
   const [muted, setMuted] = useState(true);
   const [refreshTriggers, setRefreshTriggers] = useState<Record<string, number>>({});
   const [zoomedCams, setZoomedCams] = useState<Record<string, boolean>>({});
-  const [showEventSidebar, setShowEventSidebar] = useState(true);
-  const [lastFrameData, setLastFrameData] = useState<Record<string, string>>({});
-  const qc = useQueryClient();
-
-  const handleFrameUpdate = useCallback((camId: string, dataUrl: string) => {
-    setLastFrameData(prev => ({ ...prev, [camId]: dataUrl }));
-  }, []);
-
   const [activeThreats, setActiveThreats] = useState<Record<string, { active: boolean; type: string; message: string }>>({});
 
   // Play urgent multi-burst emergency siren
