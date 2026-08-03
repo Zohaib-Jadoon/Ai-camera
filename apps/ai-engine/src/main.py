@@ -485,8 +485,6 @@ async def process_camera(camera: dict):
     last_status: str | None = None  # track last emitted status to avoid spamming
     status_report_interval = 5     # emit status every N seconds (5s for responsive UI)
     last_status_report = 0.0
-    last_frame_emit = 0.0          # wall-clock time of last frame emit
-    _FRAME_INTERVAL = 1.0 / 30    # target 30 FPS for live display
     last_tracked_for_display: list = []  # latest detections for annotation
 
     loop = asyncio.get_event_loop()
@@ -498,6 +496,7 @@ async def process_camera(camera: dict):
         import base64 as _b64
         import cv2 as _cv2e
         annotated = f.copy()
+
         for d in dets:
             bbox = d.get("smooth_box", d.get("box", d.get("bbox")))
             if bbox and len(bbox) == 4:
@@ -543,44 +542,53 @@ async def process_camera(camera: dict):
             return None
         return _b64.b64encode(buf).decode('utf-8')
 
-    while True:
-        try:
-            # ── Camera status heartbeat ─────────────────────────────────────
-            # Emit camera_status ONLINE/OFFLINE so the backend can keep the DB
-            # in sync.  We emit on every transition AND on a periodic heartbeat.
-            now = time.monotonic()
-            current_status = "ONLINE" if stream.is_online else "OFFLINE"
-            if current_status != last_status or (now - last_status_report) >= status_report_interval:
-                if sio.connected:
-                    await sio.emit("camera_status", {
-                        "camera_id": camera_id,
-                        "status": current_status,
-                    })
-                last_status = current_status
-                last_status_report = now
+    # Dedicated 30 FPS Live Stream Publisher Task (Decoupled from AI inference latency)
+    async def _stream_publisher():
+        while True:
+            try:
+                if stream.is_online and sio.connected:
+                    f = stream.get_frame()
+                    if f is not None and f.size > 0:
+                        _f_snap = f.copy()
+                        _d_snap = list(last_tracked_for_display)
+                        jpeg_b64 = await loop.run_in_executor(
+                            None, _encode_and_emit_frame, _f_snap, _d_snap
+                        )
+                        if jpeg_b64:
+                            await sio.emit("frame", {"camera_id": camera_id, "data": jpeg_b64})
+                await asyncio.sleep(0.033)  # Solid 30 FPS streaming!
+            except asyncio.CancelledError:
+                break
+            except Exception as pub_err:
+                logger.error(f"Stream publisher error: {pub_err}")
+                await asyncio.sleep(0.1)
 
-            # ── Skip inference when stream is offline ───────────────────────
-            # Without this guard, the loop runs at full speed on black
-            # placeholder frames — burning CPU and starving Socket.IO heartbeats.
-            if not stream.is_online:
-                motion.calibrating = True  # reset background model baseline on reconnect
-                await asyncio.sleep(1)
-                continue
+    publisher_task = asyncio.create_task(_stream_publisher())
 
-            frame = stream.get_frame()
+    try:
+        while True:
+            try:
+                # ── Camera status heartbeat ─────────────────────────────────────
+                # Emit camera_status ONLINE/OFFLINE so the backend can keep the DB
+                # in sync.  We emit on every transition AND on a periodic heartbeat.
+                now = time.monotonic()
+                current_status = "ONLINE" if stream.is_online else "OFFLINE"
+                if current_status != last_status or (now - last_status_report) >= status_report_interval:
+                    if sio.connected:
+                        await sio.emit("camera_status", {
+                            "camera_id": camera_id,
+                            "status": current_status,
+                        })
+                    last_status = current_status
+                    last_status_report = now
 
-            # ── Live frame streaming (DECOUPLED from AI pipeline) ─────────
-            # Emit at up to 15 FPS using last known detections for bounding
-            # boxes. NOT blocked by YOLO / face / ReID latency.
-            if (now - last_frame_emit) >= _FRAME_INTERVAL and sio.connected:
-                last_frame_emit = now
-                _f_snap = frame.copy()
-                _d_snap = list(last_tracked_for_display)
-                jpeg_b64 = await loop.run_in_executor(
-                    None, _encode_and_emit_frame, _f_snap, _d_snap
-                )
-                if jpeg_b64:
-                    await sio.emit("frame", {"camera_id": camera_id, "data": jpeg_b64})
+                # ── Skip inference when stream is offline ───────────────────────
+                if not stream.is_online:
+                    motion.calibrating = True  # reset background model baseline on reconnect
+                    await asyncio.sleep(1)
+                    continue
+
+                frame = stream.get_frame()
 
 
             # ── 🐦 Privacy masks (Frigate): black-out sensitive regions ────────
