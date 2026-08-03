@@ -437,9 +437,17 @@ async def process_camera(camera: dict):
     fight_detector = FightDetector()
     ppe_detector = PPEDetector()
     known_track_names: dict[str, str] = {}
+    # Tracks whether last inference frame contained threat-class objects.
+    # When True we bypass motion gating so threats are never missed.
+    _last_frame_had_threat: bool = False
     # Number of frames with zero centroid movement before a track is
     # considered "stationary" and handed off to the motion classifier.
     STATIONARY_FRAMES = int(os.getenv("STATIONARY_FRAMES", "50"))
+    # Weapon / threat COCO classes — also includes fight/fall which come via safety_event
+    THREAT_CLASSES = frozenset([
+        'knife', 'scissors', 'weapon', 'handgun', 'gun',
+        'pistol', 'rifle', 'sword', 'axe', 'bat', 'baseball bat',
+    ])
 
     # Sync zones from the camera payload received from backend
     zones = camera.get("zones", [])
@@ -620,8 +628,9 @@ async def process_camera(camera: dict):
                 _motion_initialized = True
 
             motion_boxes = motion.detect(gray_for_motion)
-            if not motion_boxes:
-                await asyncio.sleep(0.05)  # yield, check again in 50ms
+            if not motion_boxes and not _last_frame_had_threat:
+                # Skip YOLO inference — no motion AND no active threat track
+                await asyncio.sleep(0.033)  # yield at ~30fps cadence
                 continue
 
             # Rescaling YOLO inference to 640px wide for 3-5x speedup on CPU
@@ -684,6 +693,10 @@ async def process_camera(camera: dict):
 
                 visible_tracked.append(det)
 
+            # ── Detect if this frame contains any threat-class objects ──────
+            frame_threats = [d for d in visible_tracked if d.get('object_type', '').lower() in THREAT_CLASSES]
+            _last_frame_had_threat = bool(frame_threats)
+
             # Clean up state for tracks the CentroidTracker has pruned
             stationary_classifier.cleanup(active_track_ids)
 
@@ -699,8 +712,26 @@ async def process_camera(camera: dict):
                     "box": det.get("smooth_box", det.get("box")),  # Frigate: smooth box for UI
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
+                # Emit detection event
                 if sio.connected:
                     await sio.emit("detection", payload)
+
+            # ── Instant Threat Alert — emitted independently of detection flood ──
+            for threat_det in frame_threats:
+                threat_type = threat_det.get('object_type', 'weapon').upper()
+                threat_payload = {
+                    "camera_id": camera_id,
+                    "alert_type": f"WEAPON_DETECTED",
+                    "object_type": threat_type,
+                    "confidence": float(threat_det.get('confidence', 0)),
+                    "box": threat_det.get('smooth_box', threat_det.get('box')),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "severity": "CRITICAL",
+                    "message": f"⚠️ WEAPON DETECTED: {threat_type} on camera {camera_id}",
+                }
+                if sio.connected:
+                    await sio.emit("threat_alert", threat_payload)
+                    logger.warning(f"THREAT ALERT: {threat_type} detected on camera {camera_id}")
 
             # 🐦 Frigate recording: emit start_recording when detections fire
             if visible_tracked and sio.connected:
@@ -818,27 +849,47 @@ async def process_camera(camera: dict):
                 fall_events = fall_detector.analyze(visible_tracked)
                 for evt in fall_events:
                     if sio.connected:
-                        await sio.emit("safety_event", {
+                        fall_payload = {
                             "camera_id": camera_id,
                             "track_id": evt["track_id"],
                             "event_type": "FALL_DETECTED",
                             "confidence": float(evt.get("confidence", 0)),
                             "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                        await sio.emit("safety_event", fall_payload)
+                        # Also emit threat_alert so frontend triggers red flash + siren
+                        await sio.emit("threat_alert", {
+                            **fall_payload,
+                            "object_type": "FALL_DETECTED",
+                            "alert_type": "FALL_DETECTED",
+                            "severity": "HIGH",
+                            "message": f"⚠️ PERSON FALLEN on camera {camera_id}",
                         })
+                        logger.warning(f"FALL DETECTED on camera {camera_id}")
 
             # 5. Fight Detection (requires pose keypoints)
             if visible_tracked:
                 fight_events = fight_detector.analyze(visible_tracked)
                 for evt in fight_events:
                     if sio.connected:
-                        await sio.emit("safety_event", {
+                        fight_payload = {
                             "camera_id": camera_id,
                             "track_ids": evt["track_ids"],
                             "event_type": "FIGHT_DETECTED",
                             "confidence": float(evt.get("confidence", 0)),
                             "proximity_px": evt.get("proximity_px"),
                             "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                        await sio.emit("safety_event", fight_payload)
+                        # Also emit threat_alert so frontend triggers red flash + siren
+                        await sio.emit("threat_alert", {
+                            **fight_payload,
+                            "object_type": "FIGHT_DETECTED",
+                            "alert_type": "FIGHT_DETECTED",
+                            "severity": "CRITICAL",
+                            "message": f"⚠️ FIGHT DETECTED on camera {camera_id}",
                         })
+                        logger.warning(f"FIGHT DETECTED on camera {camera_id}")
 
             # 6. PPE Compliance (requires pose keypoints + frame)
             if visible_tracked:

@@ -514,6 +514,38 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
   }
 
   /**
+   * ─────────────────────────────────────────────────────────────────────────
+   * THREAT ALERT — highest-priority path.
+   * Emitted by AI Engine when knife / weapon / fight / fall is detected.
+   * Broadcast to ALL connected web clients IMMEDIATELY (no DB wait on hot path).
+   * Payload: { camera_id, object_type, alert_type, confidence, severity, message, timestamp }
+   * ─────────────────────────────────────────────────────────────────────────
+   */
+  @SubscribeMessage('threat_alert')
+  async handleThreatAlert(_client: Socket, payload: any): Promise<void> {
+    if (!this.verifyAiEngine(_client)) return;
+    const objType = payload?.object_type || 'UNKNOWN_THREAT';
+    const camId = payload?.camera_id;
+    this.logger.warn(`🚨 THREAT ALERT: ${objType} cam=${camId} severity=${payload?.severity}`);
+
+    // Broadcast immediately to all web clients so UI can flash red + sound siren
+    this.server.emit('threat_alert', {
+      ...payload,
+      object_type: objType,
+      alert_type: payload?.alert_type || 'WEAPON_DETECTED',
+      severity: payload?.severity || 'CRITICAL',
+    });
+
+    // Persist alert to DB asynchronously (don't await — don't block the hot path)
+    this.alertsService.create({
+      event_id: `threat-${camId}-${Date.now()}`,
+      alert_type: payload?.alert_type || 'WEAPON_DETECTED',
+      camera_id: camId,
+      object_type: objType,
+    }).catch((err) => this.logger.error(`Failed to persist threat alert: ${err.message}`));
+  }
+
+  /**
    * Safety events from AI Engine (fall, fight, PPE violations).
    * Payload: { camera_id, event_type, track_id?, track_ids?, violations?, confidence, timestamp }
    */

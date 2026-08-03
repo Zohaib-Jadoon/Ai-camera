@@ -209,10 +209,13 @@ except ImportError:
 
 
 # COCO classes of interest for surveillance
+# Includes standard COCO names plus common aliases used in fine-tuned models.
 SURVEILLANCE_CLASSES = {
     'person', 'car', 'motorcycle', 'bus', 'truck',
     'bicycle', 'dog', 'cat', 'bird', 'backpack',
     'suitcase', 'knife', 'scissors',
+    # Fine-tuned weapon model names
+    'gun', 'handgun', 'pistol', 'rifle', 'weapon', 'sword', 'bat',
 }
 
 
@@ -266,12 +269,17 @@ class Detector:
     def _yolo_detect(self, frame) -> list[dict]:
         assert self.model is not None  # only called after is-not-None check in detect()
         try:
+            # Use lower conf=0.25 so weapon/knife detections aren't suppressed by YOLO
+            # before they reach our per-class apply_object_filters gate.
+            weapon_conf = 0.25
             if self.enable_tracking:
-                results = self.model.track(frame, persist=True, tracker=self.tracker_type, verbose=False, conf=self.confidence)
+                results = self.model.track(frame, persist=True, tracker=self.tracker_type, verbose=False, conf=weapon_conf)
             else:
-                results = self.model(frame, verbose=False, conf=self.confidence)
+                results = self.model(frame, verbose=False, conf=weapon_conf)
                 
             detections = []
+            # THREAT classes need lower YOLO conf so the model doesn't suppress them
+            WEAPON_CLASSES = {'knife', 'scissors', 'gun', 'handgun', 'pistol', 'rifle', 'weapon', 'sword', 'bat'}
 
             for r in results:
                 boxes = r.boxes
@@ -287,6 +295,13 @@ class Detector:
                     conf = float(box.conf[0])
 
                     if label not in SURVEILLANCE_CLASSES:
+                        continue
+
+                    # For weapon classes, bypass the global confidence gate —
+                    # they're already pre-filtered at model level with conf=0.25,
+                    # and apply_object_filters will enforce min_score=0.25.
+                    # For all other classes, apply the global threshold here.
+                    if label not in WEAPON_CLASSES and conf < self.confidence:
                         continue
 
                     x1, y1, x2, y2 = [float(v) for v in box.xyxy[0]]
