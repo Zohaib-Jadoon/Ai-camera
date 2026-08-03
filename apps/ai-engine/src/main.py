@@ -436,6 +436,7 @@ async def process_camera(camera: dict):
     fall_detector = FallDetector()
     fight_detector = FightDetector()
     ppe_detector = PPEDetector()
+    known_track_names: dict[str, str] = {}
     # Number of frames with zero centroid movement before a track is
     # considered "stationary" and handed off to the motion classifier.
     STATIONARY_FRAMES = int(os.getenv("STATIONARY_FRAMES", "50"))
@@ -506,13 +507,13 @@ async def process_camera(camera: dict):
                 is_threat = any(w in obj_type for w in ['weapon', 'gun', 'knife', 'scissors', 'fight', 'fall', 'intrusion'])
 
                 if is_threat:
-                    color = (0, 0, 240)  # Bright Red
+                    color = (0, 0, 255)  # Bright Red
                     thickness = 3
                     label = f"ALERT: {d.get('object_type', '?').upper()} {conf:.0%}"
                 elif person_name:
-                    color = (0, 230, 255)  # Bright Cyan/Gold
-                    thickness = 2
-                    label = f"{person_name} ({conf:.0%})"
+                    color = (0, 255, 255)  # Bright Yellow/Cyan
+                    thickness = 3
+                    label = f"★ {person_name.upper()} ({conf:.0%})"
                 else:
                     color = (0, 255, 80)  # Emerald Green default
                     thickness = 2
@@ -520,13 +521,15 @@ async def process_camera(camera: dict):
 
                 _cv2e.rectangle(annotated, (x1, y1), (x2, y2), color, thickness)
 
-                # Draw high-visibility filled label banner background
-                (tw, th), _ = _cv2e.getTextSize(label, _cv2e.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                banner_y1 = max(y1 - 20, 0)
-                banner_y2 = max(y1, 20)
-                _cv2e.rectangle(annotated, (x1, banner_y1), (x1 + tw + 10, banner_y2), color, -1)
-                _cv2e.putText(annotated, label, (x1 + 5, max(y1 - 5, 15)),
-                              _cv2e.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, _cv2e.LINE_AA)
+                # Draw high-visibility filled label banner background directly above box
+                font_scale = 0.6 if person_name or is_threat else 0.5
+                font_thick = 2 if person_name or is_threat else 1
+                (tw, th), baseline = _cv2e.getTextSize(label, _cv2e.FONT_HERSHEY_SIMPLEX, font_scale, font_thick)
+                banner_y1 = max(y1 - th - 12, 0)
+                banner_y2 = max(y1, th + 12)
+                _cv2e.rectangle(annotated, (x1, banner_y1), (x1 + tw + 14, banner_y2), color, -1)
+                _cv2e.putText(annotated, label, (x1 + 6, banner_y2 - 6),
+                              _cv2e.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), font_thick, _cv2e.LINE_AA)
 
         # Resize to 854px wide for bandwidth
         h, w = annotated.shape[:2]
@@ -661,6 +664,14 @@ async def process_camera(camera: dict):
                         # Genuine movement — reset classifier so anchor refreshes
                         stationary_classifier.on_active(tid)
 
+                # Attach cached face recognition person_name to person detection
+                if det.get("object_type") in ["person", "face"]:
+                    tid = det.get("track_id")
+                    if tid and tid in known_track_names:
+                        det["person_name"] = known_track_names[tid]
+                    elif known_track_names:
+                        det["person_name"] = list(known_track_names.values())[-1]
+
                 visible_tracked.append(det)
 
             # Clean up state for tracks the CentroidTracker has pruned
@@ -719,10 +730,14 @@ async def process_camera(camera: dict):
                 for face in faces:
                     if face.get("is_known") and face.get("person_name"):
                         p_name = face["person_name"]
-                        # Attach recognized name to display tracking list
+                        # Attach recognized name to display tracking list & track cache
                         for det in visible_tracked:
                             if det.get("object_type") in ["person", "face"]:
                                 det["person_name"] = p_name
+                                tid = det.get("track_id")
+                                if tid:
+                                    known_track_names[tid] = p_name
+
                         # Add face bounding box to display overlay
                         if face.get("bbox"):
                             visible_tracked.append({
@@ -876,9 +891,12 @@ async def process_camera(camera: dict):
                     forecast_engine.record_event(
                         camera_id=camera_id,
                         object_type=det.get("object_type", "unknown"),
+                        confidence=float(det.get("confidence", 0)),
                     )
 
-            # Cleanup stale state in analyzers
+            # Update last_tracked_for_display so the 15 FPS video stream encoder
+            # receives current bounding boxes and person name labels on every frame!
+            last_tracked_for_display = [d.copy() for d in visible_tracked]
             active_track_str = active_track_ids
             speed_estimator.cleanup(active_track_str)
             wrongway_detector.cleanup(active_track_str)
