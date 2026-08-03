@@ -163,6 +163,8 @@ export default function LiveMonitoring() {
   const [muted, setMuted] = useState(true);
   const [refreshTriggers, setRefreshTriggers] = useState<Record<string, number>>({});
   const [zoomedCams, setZoomedCams] = useState<Record<string, boolean>>({});
+  const [showEventSidebar, setShowEventSidebar] = useState(true);
+  const qc = useQueryClient();
   const [activeThreats, setActiveThreats] = useState<Record<string, { active: boolean; type: string; message: string }>>({});
 
   // Play urgent multi-burst emergency siren
@@ -290,8 +292,10 @@ export default function LiveMonitoring() {
 
   const handleSnapshot = (e: React.MouseEvent, camId: string, camName: string) => {
     e.stopPropagation();
-    const dataUrl = lastFrameData[camId];
-    if (!dataUrl) return;
+    const container = document.getElementById(`cam-card-${camId}`);
+    const img = container?.querySelector('img') as HTMLImageElement | null;
+    const dataUrl = img?.src;
+    if (!dataUrl || !dataUrl.startsWith('data:')) return;
     const a = document.createElement('a');
     a.href = dataUrl;
     a.download = `snapshot-${camName.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.jpg`;
@@ -416,7 +420,6 @@ export default function LiveMonitoring() {
                         isOnline={isOnline}
                         refreshTrigger={refreshTriggers[cam.id] ?? 0}
                         isZoomed={!!zoomedCams[cam.id]}
-                        onFrameUpdate={handleFrameUpdate}
                       />
                     </div>
 
