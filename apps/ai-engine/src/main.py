@@ -499,10 +499,35 @@ async def process_camera(camera: dict):
             bbox = d.get("smooth_box", d.get("box", d.get("bbox")))
             if bbox and len(bbox) == 4:
                 x1, y1, x2, y2 = [int(v) for v in bbox]
-                label = f"{d.get('object_type', '?')} {d.get('confidence', 0):.0%}"
-                _cv2e.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 80), 2)
-                _cv2e.putText(annotated, label, (x1, max(y1 - 8, 12)),
-                              _cv2e.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 80), 1)
+                obj_type = str(d.get('object_type', '?')).lower()
+                person_name = d.get('person_name') or d.get('name')
+                conf = float(d.get('confidence', 0))
+
+                is_threat = any(w in obj_type for w in ['weapon', 'gun', 'knife', 'scissors', 'fight', 'fall', 'intrusion'])
+
+                if is_threat:
+                    color = (0, 0, 240)  # Bright Red
+                    thickness = 3
+                    label = f"ALERT: {d.get('object_type', '?').upper()} {conf:.0%}"
+                elif person_name:
+                    color = (0, 230, 255)  # Bright Cyan/Gold
+                    thickness = 2
+                    label = f"{person_name} ({conf:.0%})"
+                else:
+                    color = (0, 255, 80)  # Emerald Green default
+                    thickness = 2
+                    label = f"{d.get('object_type', '?')} {conf:.0%}"
+
+                _cv2e.rectangle(annotated, (x1, y1), (x2, y2), color, thickness)
+
+                # Draw high-visibility filled label banner background
+                (tw, th), _ = _cv2e.getTextSize(label, _cv2e.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                banner_y1 = max(y1 - 20, 0)
+                banner_y2 = max(y1, 20)
+                _cv2e.rectangle(annotated, (x1, banner_y1), (x1 + tw + 10, banner_y2), color, -1)
+                _cv2e.putText(annotated, label, (x1 + 5, max(y1 - 5, 15)),
+                              _cv2e.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, _cv2e.LINE_AA)
+
         # Resize to 854px wide for bandwidth
         h, w = annotated.shape[:2]
         if w > 854:
@@ -692,6 +717,21 @@ async def process_camera(camera: dict):
                     None, face_engine.process, frame
                 )
                 for face in faces:
+                    if face.get("is_known") and face.get("person_name"):
+                        p_name = face["person_name"]
+                        # Attach recognized name to display tracking list
+                        for det in visible_tracked:
+                            if det.get("object_type") in ["person", "face"]:
+                                det["person_name"] = p_name
+                        # Add face bounding box to display overlay
+                        if face.get("bbox"):
+                            visible_tracked.append({
+                                "object_type": "face",
+                                "person_name": p_name,
+                                "confidence": face.get("confidence", 0.95),
+                                "box": face["bbox"],
+                            })
+
                     if sio.connected:
                         await sio.emit("face_event", {
                             "camera_id": camera_id,

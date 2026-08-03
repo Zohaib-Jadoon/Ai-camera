@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ShieldAlert,
@@ -41,7 +41,6 @@ function playAlertSound(severity: ToastSeverity) {
     const ctx = new AudioCtx();
 
     if (severity === 'CRITICAL') {
-      // Dual-tone urgent alert chime (880Hz -> 1174Hz)
       const osc1 = ctx.createOscillator();
       const osc2 = ctx.createOscillator();
       const gain = ctx.createGain();
@@ -63,7 +62,6 @@ function playAlertSound(severity: ToastSeverity) {
       osc1.stop(ctx.currentTime + 0.2);
       osc2.stop(ctx.currentTime + 0.5);
     } else if (severity === 'HIGH') {
-      // Soft double chime (587Hz -> 880Hz)
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
 
@@ -80,7 +78,6 @@ function playAlertSound(severity: ToastSeverity) {
       osc.start(ctx.currentTime);
       osc.stop(ctx.currentTime + 0.35);
     } else {
-      // Gentle subtle notification pop (523Hz)
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
 
@@ -104,26 +101,34 @@ function playAlertSound(severity: ToastSeverity) {
 export default function NotificationToastManager() {
   const router = useRouter();
   const [toasts, setToasts] = useState<AlertToast[]>([]);
+  const lastAlertTimes = useRef<Record<string, number>>({});
   const qc = useQueryClient();
 
   const addToast = useCallback((toast: Omit<AlertToast, 'id' | 'timestamp'>) => {
-    const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    // Deduplication check — 15 seconds per alert type/camera to prevent toast spamming
+    const key = `${toast.cameraId || 'global'}-${toast.objectType || toast.title}`;
+    const now = Date.now();
+    if (lastAlertTimes.current[key] && now - lastAlertTimes.current[key] < 15000) {
+      return; // Skip duplicate toast during cooldown
+    }
+    lastAlertTimes.current[key] = now;
+
+    const id = `toast-${now}-${Math.random().toString(36).slice(2, 7)}`;
     const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const newToast: AlertToast = { ...toast, id, timestamp };
 
     setToasts((prev) => {
-      // Keep max 4 toasts on screen simultaneously to prevent UI clutter
-      const filtered = prev.slice(-3);
+      const filtered = prev.slice(-2); // Max 3 toasts at once
       return [...filtered, newToast];
     });
 
     playAlertSound(newToast.severity);
 
-    // Auto dismiss non-critical toasts after 7 seconds
+    // Auto dismiss non-critical toasts after 6 seconds
     if (newToast.severity !== 'CRITICAL') {
       setTimeout(() => {
         setToasts((prev) => prev.filter((t) => t.id !== id));
-      }, 7000);
+      }, 6000);
     }
   }, []);
 
@@ -142,12 +147,25 @@ export default function NotificationToastManager() {
     const socket = getSocket();
 
     const onAlert = (payload: any) => {
-      const objType = (payload.object_type || payload.alert_type || 'ALERT').toUpperCase();
-      let severity: ToastSeverity = 'MEDIUM';
-      let title = 'Detection Alert';
-      let msg = `Event triggered on camera ${payload.camera_id?.slice(0, 8) || 'System'}`;
+      const objType = (payload.object_type || payload.alert_type || '').toUpperCase();
 
-      if (objType.includes('INTRUSION') || objType.includes('WEAPON') || objType.includes('FIRE') || objType.includes('FIGHT') || objType.includes('FALL')) {
+      // Filter out generic routine object detections (person, car, truck) from triggering floating popups.
+      // Floating popups are reserved ONLY for genuine alerts & face recognition matches.
+      const isRoutine = ['PERSON', 'CAR', 'TRUCK', 'BUS', 'MOTORCYCLE', 'BICYCLE', 'DOG', 'CAT'].includes(objType)
+        && !payload.alert_type?.includes('INTRUSION')
+        && !payload.alert_type?.includes('WEAPON');
+
+      if (isRoutine) {
+        // Just refresh query cache for background lists
+        qc.invalidateQueries({ queryKey: ['alerts'] });
+        return;
+      }
+
+      let severity: ToastSeverity = 'MEDIUM';
+      let title = 'Security Alert';
+      let msg = `Triggered on camera ${payload.camera_id?.slice(0, 8) || 'System'}`;
+
+      if (objType.includes('INTRUSION') || objType.includes('WEAPON') || objType.includes('KNIFE') || objType.includes('GUN') || objType.includes('FIRE') || objType.includes('FIGHT') || objType.includes('FALL')) {
         severity = 'CRITICAL';
         title = `CRITICAL: ${objType.replace(/_/g, ' ')}`;
         msg = `Unpermitted security breach detected`;
@@ -157,11 +175,11 @@ export default function NotificationToastManager() {
         msg = `Safety rule violation detected`;
       } else if (objType.includes('KNOWN_FACE')) {
         severity = 'LOW';
-        title = `VIP Identified: ${payload.person_name || 'Registered Subject'}`;
-        msg = `Face match confirmed (${Math.round((payload.confidence || 0.95) * 100)}%)`;
+        title = `Person Identified: ${payload.person_name || 'Registered Subject'}`;
+        msg = `Face recognition match confirmed (${Math.round((payload.confidence || 0.95) * 100)}%)`;
       } else {
-        title = `${objType.replace(/_/g, ' ')} Detected`;
-        msg = `Object tracking trigger active`;
+        title = `${objType.replace(/_/g, ' ')} Alert`;
+        msg = `Security rule trigger active`;
       }
 
       addToast({
@@ -173,7 +191,6 @@ export default function NotificationToastManager() {
         confidence: payload.confidence,
       });
 
-      // Refresh notification counts
       qc.invalidateQueries({ queryKey: ['alerts'] });
       qc.invalidateQueries({ queryKey: ['notifications'] });
       qc.invalidateQueries({ queryKey: ['notifications', 'unread-count'] });
@@ -181,11 +198,11 @@ export default function NotificationToastManager() {
 
     const onPersonAlert = (payload: any) => {
       addToast({
-        title: `Person Identified: ${payload.person_name || 'Subject'}`,
-        message: payload.message || 'Custom watchlist alert triggered',
-        severity: 'HIGH',
+        title: `Recognized: ${payload.person_name || 'Registered Subject'}`,
+        message: payload.message || `Subject detected on camera feed`,
+        severity: 'LOW',
         cameraId: payload.camera_id,
-        objectType: 'FACE_RECOGNITION',
+        objectType: 'KNOWN_FACE',
         confidence: payload.confidence,
       });
     };
