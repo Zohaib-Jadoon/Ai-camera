@@ -14,14 +14,14 @@ Pipeline:
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # Attempt to load EasyOCR
 try:
-    import easyocr
+    import easyocr  # pyright: ignore[reportMissingImports]
     EASYOCR_AVAILABLE = True
 except ImportError:
     EASYOCR_AVAILABLE = False
@@ -38,7 +38,7 @@ PLATE_PATTERN = re.compile(r'^[A-Z0-9\-\s]{3,12}$', re.IGNORECASE)
 class LPRConfig:
     """Configuration for license plate recognition."""
     # Which languages to try (EasyOCR language codes)
-    languages: list[str] = None  # type: ignore
+    languages: list[str] = field(default_factory=lambda: ['en'])
     # Minimum OCR confidence to accept a plate reading
     min_confidence: float = 0.4
     # Crop region: bottom portion of vehicle bounding box (0.5 = bottom 50%)
@@ -47,10 +47,6 @@ class LPRConfig:
     cooldown_sec: float = 10.0
     # Process every Nth frame (LPR is expensive)
     frame_skip: int = 10
-
-    def __post_init__(self):
-        if self.languages is None:
-            self.languages = ['en']
 
 
 class LPREngine:
@@ -173,7 +169,7 @@ class LPREngine:
 
     def get_cached_plate(self, track_id: str) -> Optional[str]:
         """Return cached plate text for a track, if available."""
-        cached = self._plate_cache.get(str(track_id))
+        cached = self._plate_cache.get(track_id)
         return cached["plate_text"] if cached else None
 
     def cleanup(self, active_ids: set[str]) -> None:

@@ -15,7 +15,7 @@ cosine-similarity matching to find cross-camera correspondences.
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Any
 
 import numpy as np
 
@@ -64,8 +64,8 @@ class ReIDEngine:
 
     def __init__(self, config: Optional[ReIDConfig] = None):
         self.config = config or ReIDConfig()
-        self._model = None
-        self._transform = None
+        self._model: Any = None
+        self._transform: Any = None
         self._loaded = False
         self._frame_counter = 0
         self._gallery: list[GalleryEntry] = []
@@ -107,7 +107,8 @@ class ReIDEngine:
                 else:
                     crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
 
-                tensor = self._transform(crop).unsqueeze(0)
+                transformed = self._transform(crop)
+                tensor = torch.as_tensor(transformed).unsqueeze(0)
                 with torch.no_grad():
                     feat = self._model(tensor)
                 embedding = feat.squeeze().numpy()

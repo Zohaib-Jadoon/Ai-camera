@@ -18,6 +18,8 @@ import socketio
 import os
 import time
 import threading
+import concurrent.futures
+from typing import Any, Callable, TypeVar, cast
 from pathlib import Path
 from datetime import datetime, timezone
 from .detector import Detector
@@ -94,13 +96,35 @@ forecast_engine = ForecastEngine()
 enrichment_lock = threading.Lock()
 enrichment_tracks = {}
 
+# Dedicated thread pool for YOLO model inference (isolated from JPEG encoding & disk I/O)
+inference_executor = concurrent.futures.ThreadPoolExecutor(max_workers=3, thread_name_prefix="yolo_infer")
+
+# Dedicated thread pool for preview video encoding
+stream_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="stream_enc")
+
 
 def analyze_enrichment(frame, detections, camera_id, masks, timestamp, index_clip):
     """Serialize shared enrichment state, independently of the YOLO detection loop."""
+    if frame is None or getattr(frame, "size", 0) == 0:
+        return masks, timestamp, [], [], []
+
     with enrichment_lock:
-        faces = face_engine.process(frame)
+        # Optimization: Only run heavy face recognition if a person was actually detected in the frame!
+        has_person = any(d.get('object_type') == 'person' for d in detections) if detections else False
+        if has_person:
+            import cv2 as _cv2_face
+            fh, fw = frame.shape[:2]
+            # Downscale frame to 640px for 4x faster RetinaFace + ArcFace GPU execution
+            if fw > 640:
+                face_frame = _cv2_face.resize(frame, (640, int(fh * 640 / fw)))
+            else:
+                face_frame = frame
+            faces = face_engine.process(face_frame)
+        else:
+            faces = []
+
         plates = lpr_engine.process(detections, frame) if detections else []
-        identities = reid_engine.process(detections, frame, camera_id) if detections else []
+        identities = reid_engine.process(detections, frame, camera_id) if (detections and has_person) else []
         if index_clip:
             clip_search.index_frame(frame, camera_id, detections)
         enrichment_tracks[camera_id] = {d['track_id'] for d in detections if d.get('track_id')}
@@ -126,6 +150,17 @@ sio = socketio.AsyncClient(
     reconnection_delay_max=15,      # cap at 15s
     engineio_logger=False,
 )
+
+F = TypeVar('F', bound=Callable[..., Any])
+
+def sio_on(event: str, namespace: str | None = None) -> Callable[[F], F]:
+    """Type-safe decorator wrapper for sio.on."""
+    dec = sio.on(event, namespace=namespace)
+    if dec is None:
+        def dummy_decorator(fn: F) -> F:
+            return fn
+        return dummy_decorator
+    return cast(Callable[[F], F], dec)
 
 camera_manager = CameraManager()
 active_streams: dict[str, StreamHandler] = {}
@@ -157,7 +192,7 @@ async def disconnect():
     logger.warning("Disconnected from backend WebSocket — will reconnect automatically")
 
 
-@sio.on('sync_cameras')
+@sio_on('sync_cameras')
 async def on_sync_cameras(cameras):
     async with _camera_sync_lock:
         await _sync_cameras(cameras)
@@ -202,8 +237,7 @@ async def _sync_cameras(cameras):
         existing = camera_manager.get(cid)
         new_rtsp = camera.get("rtsp_url", "")
 
-        old_config = active_camera_configs.get(cid, {})
-        active_camera_configs[cid] = camera
+        old_config = dict(active_camera_configs.get(cid, {}))
         if existing and any(old_config.get(key) != camera.get(key) for key in ("rtsp_url", "detect_url", "record_url", "sop_name")):
             # URL changed — cancel old task and stream, then respawn
             logger.info(
@@ -216,6 +250,8 @@ async def _sync_cameras(cameras):
             active_intrusion_detectors.pop(cid, None)
             existing = None  # fall through to spawn below
 
+        active_camera_configs[cid] = dict(camera)
+
         if not existing:
             task = asyncio.create_task(process_camera(camera))
             camera_manager.register(cid, camera.get("name", cid), new_rtsp, task)
@@ -223,12 +259,12 @@ async def _sync_cameras(cameras):
 
 
 
-@sio.on('sync_embeddings')
+@sio_on('sync_embeddings')
 async def on_sync_embeddings(embeddings):
     await asyncio.to_thread(face_engine.load_embeddings, embeddings)
 
 
-@sio.on('request_model_swap')
+@sio_on('request_model_swap')
 async def on_model_swap(data):
     """Hot-swap the active YOLO model for a given SOP.
 
@@ -248,14 +284,14 @@ async def on_model_swap(data):
             await sio.emit("model_swap_ack", {"sop_name": sop_name, "status": "error", "error": str(e)})
 
 
-@sio.on('request_registry')
+@sio_on('request_registry')
 async def on_request_registry(_data=None):
     """Return the full model registry snapshot to the backend."""
     if sio.connected:
         await sio.emit("sync_registry", model_registry.snapshot())
 
 
-@sio.on('extract_face')
+@sio_on('extract_face')
 async def on_extract_face(data: dict):
     """
     Extract face embedding from an uploaded image.
@@ -310,7 +346,7 @@ async def on_extract_face(data: dict):
             })
 
 
-@sio.on('test_stream')
+@sio_on('test_stream')
 async def on_test_stream(data: dict):
     """
     Quick RTSP reachability test — called by backend when the user clicks
@@ -375,7 +411,7 @@ async def on_test_stream(data: dict):
     logger.info("Stream test completed: ok=%s", ok)
 
 
-@sio.on('sync_zones')
+@sio_on('sync_zones')
 async def on_sync_zones(data: dict):
     """Push updated zone list to a running camera task without restarting it.
 
@@ -390,7 +426,7 @@ async def on_sync_zones(data: dict):
         logger.warning(f"sync_zones: camera {camera_id} not found in active tasks")
 
 
-@sio.on('clip_search')
+@sio_on('clip_search')
 async def on_clip_search(data: dict):
     """Natural language video search.
 
@@ -417,7 +453,7 @@ async def on_clip_search(data: dict):
     logger.info(f"CLIP search '{query}': {len(results)} results")
 
 
-@sio.on('request_forecast')
+@sio_on('request_forecast')
 async def on_request_forecast(data: dict):
     """Generate predictive forecasts.
 
@@ -449,10 +485,10 @@ async def health_heartbeat():
                 stream = active_streams.get(cam_id)
                 await sio.emit('camera_status', {'camera_id': cam_id, 'status': 'ONLINE' if stream and stream.is_online else 'OFFLINE'})
         if sio.connected:
-            selected_models = [active_camera_detectors.get(cid) for cid in camera_manager.ids()] or [detector]
-            object_loaded = all(model is not None and model.is_loaded() for model in selected_models)
+            selected_models = [m for cid in camera_manager.ids() if (m := active_camera_detectors.get(cid)) is not None] or [detector]
+            object_loaded = bool(selected_models) and all(getattr(model, "is_loaded", lambda: False)() for model in selected_models)
             object_error = ('MODEL_UNAVAILABLE' if not object_loaded else
-                            next((model.last_error for model in selected_models if model.last_error), None))
+                            next((getattr(model, 'last_error', None) for model in selected_models if getattr(model, 'last_error', None)), None))
             await sio.emit('engine_health', {
                 'object_detection': {'loaded': object_loaded, 'error': object_error},
                 'face_recognition': {'loaded': face_engine.is_loaded(), 'error': face_engine.last_error},
@@ -508,17 +544,29 @@ async def process_camera(camera: dict):
     record_url = camera.get("record_url") or rtsp_url
     sop_name = camera.get("sop_name")  # optional SOP assigned to this camera
     weapon_mode = sop_name in ("weapon", "weapon_detection")
+    continuous_scan = weapon_mode
     camera_detector = None
     model_path = None
+
+    # Adaptive FPS: Balance GPU load dynamically across active cameras
+    active_cam_count = max(len(camera_manager.ids()), 1)
+    target_active_fps = 14.0 if active_cam_count == 1 else (10.0 if active_cam_count == 2 else 8.0)
+    idle_scan_interval = 0.35  # ~3 FPS when scene has zero motion and no active tracks
+
     schedule = InferenceSchedule(
-        fps=float(os.getenv("PROCESS_FPS", "10")),
-        idle_interval=float(os.getenv("IDLE_SCAN_INTERVAL", "0.5")),
-        continuous=weapon_mode,
+        fps=float(os.getenv("PROCESS_FPS", str(target_active_fps))),
+        idle_interval=float(os.getenv("IDLE_SCAN_INTERVAL", str(idle_scan_interval))),
+        continuous=continuous_scan,
     )
     metrics_started = time.monotonic()
     metrics_count = 0
     metrics_inference_ms = 0.0
     last_auxiliary_run = float('-inf')
+    last_ppe_run = float('-inf')
+    last_recording_triggered = float('-inf')
+    last_track_detection_emitted: dict[str, float] = {}
+    last_threat_alert_time: dict[str, float] = {}
+    recent_threat_boxes: dict[str, tuple[dict, float]] = {}
     enrichment = BackgroundAnalysis()
     # 🐦 Privacy masks: normalised rectangles blacked-out before inference
     tracker = ObjectTracker()
@@ -540,10 +588,12 @@ async def process_camera(camera: dict):
     # Number of frames with zero centroid movement before a track is
     # considered "stationary" and handed off to the motion classifier.
     STATIONARY_FRAMES = int(os.getenv("STATIONARY_FRAMES", "50"))
-    # Weapon / threat COCO classes — also includes fight/fall which come via safety_event
+    # Weapon & threat COCO/YOLO-World classes — includes weapons, fire, and blades
     THREAT_CLASSES = frozenset([
         'knife', 'scissors', 'weapon', 'handgun', 'gun',
         'pistol', 'rifle', 'firearm', 'sword', 'axe', 'bat', 'baseball bat',
+        'blade', 'dagger', 'machete',
+        'fire', 'flame', 'smoke', 'lighter',
     ])
 
     # Sync zones from the camera payload received from backend
@@ -597,9 +647,19 @@ async def process_camera(camera: dict):
                 person_name = d.get('person_name') or d.get('name')
                 conf = float(d.get('confidence', 0))
 
-                is_threat = any(w in obj_type for w in ['weapon', 'gun', 'knife', 'scissors', 'fight', 'fall', 'intrusion'])
+                is_fire = any(w in obj_type for w in ['fire', 'flame', 'smoke', 'lighter'])
+                is_weapon = any(w in obj_type for w in ['weapon', 'gun', 'knife', 'scissors', 'pistol', 'rifle', 'firearm', 'sword', 'blade', 'dagger', 'machete', 'axe', 'bat'])
+                is_threat = is_fire or is_weapon or any(w in obj_type for w in ['fight', 'fall', 'intrusion'])
 
-                if is_threat:
+                if is_fire:
+                    color = (0, 69, 255)  # Fiery Orange-Red (BGR)
+                    thickness = 3
+                    label = f"🔥 FIRE: {d.get('object_type', '?').upper()} {conf:.0%}"
+                elif is_weapon:
+                    color = (0, 0, 255)  # Bright Red
+                    thickness = 3
+                    label = f"⚠️ WEAPON: {d.get('object_type', '?').upper()} {conf:.0%}"
+                elif is_threat:
                     color = (0, 0, 255)  # Bright Red
                     thickness = 3
                     label = f"ALERT: {d.get('object_type', '?').upper()} {conf:.0%}"
@@ -621,21 +681,24 @@ async def process_camera(camera: dict):
                 banner_y1 = max(y1 - th - 12, 0)
                 banner_y2 = max(y1, th + 12)
                 _cv2e.rectangle(annotated, (x1, banner_y1), (x1 + tw + 14, banner_y2), color, -1)
+                text_color = (255, 255, 255) if (is_threat or is_fire or is_weapon) else (0, 0, 0)
                 _cv2e.putText(annotated, label, (x1 + 6, banner_y2 - 6),
-                              _cv2e.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), font_thick, _cv2e.LINE_AA)
+                              _cv2e.FONT_HERSHEY_SIMPLEX, font_scale, text_color, font_thick, _cv2e.LINE_AA)
 
         annotated = apply_privacy_masks(annotated, masks)
+        if annotated is None or getattr(annotated, "size", 0) == 0:
+            return None
         # Resize to 640px wide for preview encoding.
         h, w = annotated.shape[:2]
         if w > 640:
             scale = 640 / w
             annotated = _cv2e.resize(annotated, (640, int(h * scale)))
-        ok, buf = _cv2e.imencode('.jpg', annotated, [_cv2e.IMWRITE_JPEG_QUALITY, 50])
-        if not ok:
+        ok, buf = _cv2e.imencode('.jpg', annotated, [_cv2e.IMWRITE_JPEG_QUALITY, 45])
+        if not ok or buf is None:
             return None
         return _b64.b64encode(buf).decode('utf-8')
 
-    # Dedicated 30 FPS Live Stream Publisher Task (Decoupled from AI inference latency)
+    # Dedicated Live Stream Publisher Task (runs on stream_executor, decoupled from YOLO)
     async def _stream_publisher():
         last_sequence = -1
         while True:
@@ -647,12 +710,12 @@ async def process_camera(camera: dict):
                         _f_snap = f
                         _d_snap = list(last_tracked_for_display) if masks == last_detection_masks else []
                         jpeg_b64 = await loop.run_in_executor(
-                            None, _encode_and_emit_frame, _f_snap, _d_snap, masks
+                            stream_executor, _encode_and_emit_frame, _f_snap, _d_snap, masks
                         )
                         if jpeg_b64 and masks == active_camera_configs.get(camera_id, camera).get("privacy_masks", []):
                             await sio.emit("frame", {"camera_id": camera_id, "data": jpeg_b64})
                             last_sequence = sequence
-                await asyncio.sleep(0.033)  # Solid 30 FPS streaming!
+                await asyncio.sleep(0.05)  # Fluid 20 FPS streaming (cuts encode overhead by 33%!)
             except asyncio.CancelledError:
                 break
             except Exception as pub_err:
@@ -685,15 +748,18 @@ async def process_camera(camera: dict):
                 if camera_detector is None:
                     camera_detector, model_path = await get_camera_detector(sop_name)
                     active_camera_detectors[camera_id] = camera_detector
-                    logger.info("Camera %s model=%s continuous_weapon_scan=%s", camera_id, model_path, weapon_mode)
+                    logger.info("Camera %s model=%s continuous_scan=%s", camera_id, model_path, continuous_scan)
 
                 frame, sequence = stream.get_frame_with_sequence()
                 if frame is None or sequence == last_inference_sequence:
-                    await asyncio.sleep(0.033)
+                    await asyncio.sleep(0.01)
                     continue
                 last_inference_sequence = sequence
                 masks = active_camera_configs.get(camera_id, camera).get("privacy_masks", [])
                 frame = await asyncio.to_thread(apply_privacy_masks, frame, masks)
+                if frame is None or getattr(frame, "size", 0) == 0:
+                    await asyncio.sleep(0.01)
+                    continue
 
                 # ── Motion gating ────────────────────────────────────────────────
                 import cv2 as _cv2_motion
@@ -704,8 +770,9 @@ async def process_camera(camera: dict):
                     _motion_initialized = True
 
                 motion_boxes = motion.detect(gray_for_motion)
-                if not schedule.due(time.monotonic(), bool(motion_boxes), _last_frame_had_threat):
-                    await asyncio.sleep(0.033)
+                has_active_activity = bool(motion_boxes) or _last_frame_had_threat or bool(last_tracked_for_display)
+                if not schedule.due(time.monotonic(), has_active_activity, _last_frame_had_threat):
+                    await asyncio.sleep(0.01)
                     continue
 
                 # ── YOLO inference at 640px ──────────────────────────────────────
@@ -718,7 +785,7 @@ async def process_camera(camera: dict):
                 inference_started = time.monotonic()
                 schedule.started(inference_started)
                 raw_detections = await loop.run_in_executor(
-                    None, camera_detector.detect, resized_frame
+                    inference_executor, camera_detector.detect, resized_frame
                 )
                 metrics_count += 1
                 metrics_inference_ms += (time.monotonic() - inference_started) * 1000
@@ -754,57 +821,93 @@ async def process_camera(camera: dict):
                     thresh = get_stationary_threshold(det["object_type"])
 
                     if det['object_type'] not in THREAT_CLASSES and thresh.motion_classifier_enabled and motionless >= STATIONARY_FRAMES:
-                        _sb = det.get("smooth_box", det["box"])
-                        median_box = (int(_sb[0]), int(_sb[1]), int(_sb[2]), int(_sb[3]))
-                        stationary_classifier.ensure_anchor(tid, frame, median_box)
-                        _rb = det["box"]
-                        raw_box = (int(_rb[0]), int(_rb[1]), int(_rb[2]), int(_rb[3]))
-                        if stationary_classifier.evaluate(tid, frame, raw_box):
-                            continue
+                        _sb = det.get("smooth_box") or det.get("box")
+                        if _sb and len(_sb) >= 4:
+                            median_box = (int(_sb[0]), int(_sb[1]), int(_sb[2]), int(_sb[3]))
+                            stationary_classifier.ensure_anchor(tid, frame, median_box)
+                        _rb = det.get("box")
+                        if _rb and len(_rb) >= 4:
+                            raw_box = (int(_rb[0]), int(_rb[1]), int(_rb[2]), int(_rb[3]))
+                            if stationary_classifier.evaluate(tid, frame, raw_box):
+                                continue
                         stationary_classifier.on_active(tid)
 
                     visible_tracked.append(det)
-
-                # ── Threat detection ─────────────────────────────────────────────
+                
+                # ── Threat detection & persistence buffer ────────────────────────
                 frame_threats = [d for d in visible_tracked
                                  if d.get('object_type', '').lower() in THREAT_CLASSES]
                 _last_frame_had_threat = bool(frame_threats)
 
+                for td in frame_threats:
+                    t_name = td.get('object_type', '').lower()
+                    recent_threat_boxes[t_name] = (dict(td), now + 1.2)
+
+                active_persistent_threats = []
+                expired_threat_keys = []
+                for tk, (box_det, expiry) in list(recent_threat_boxes.items()):
+                    if now < expiry:
+                        if not any(d.get('object_type', '').lower() == tk for d in visible_tracked):
+                            active_persistent_threats.append(box_det)
+                    else:
+                        expired_threat_keys.append(tk)
+                for tk in expired_threat_keys:
+                    recent_threat_boxes.pop(tk, None)
+
+                # Instantly update display overlay for stream publisher with zero flicker
+                last_tracked_for_display = list(visible_tracked) + active_persistent_threats
+                last_detection_masks = masks
+
                 stationary_classifier.cleanup(active_track_ids)
 
-                # Training data collector (offloaded)
-                await loop.run_in_executor(None, collector.record, frame, raw_detections)
+                # Training data collector (offloaded only when enabled)
+                if collector.enabled:
+                    await loop.run_in_executor(None, collector.record, frame, raw_detections)
 
-                # ── Emit detections ──────────────────────────────────────────────
+                # ── Emit detections (debounced to once every 10s per track) ──────
                 if sio.connected:
                     for det in visible_tracked:
-                        await sio.emit("detection", {
-                            "camera_id": camera_id,
-                            "object_type": det["object_type"],
-                            "confidence": float(det["confidence"]),
-                            "track_id": det.get("track_id"),
-                            "box": det.get("smooth_box", det.get("box")),
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        })
+                        tid = str(det.get("track_id") or det["object_type"])
+                        if (now - last_track_detection_emitted.get(tid, 0)) >= 10.0:
+                            last_track_detection_emitted[tid] = now
+                            await sio.emit("detection", {
+                                "camera_id": camera_id,
+                                "object_type": det["object_type"],
+                                "confidence": float(det["confidence"]),
+                                "track_id": det.get("track_id"),
+                                "box": det.get("smooth_box", det.get("box")),
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            })
 
-                # ── Instant threat alerts ────────────────────────────────────────
+                # ── Instant threat alerts (debounced to once every 5s per threat type)
                 if sio.connected:
                     for threat_det in frame_threats:
                         threat_type = threat_det.get('object_type', 'weapon').upper()
-                        await sio.emit("threat_alert", {
-                            "camera_id": camera_id,
-                            "alert_type": "WEAPON_DETECTED",
-                            "object_type": threat_type,
-                            "confidence": float(threat_det.get('confidence', 0)),
-                            "box": threat_det.get('smooth_box', threat_det.get('box')),
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "severity": "CRITICAL",
-                            "message": f"⚠️ WEAPON DETECTED: {threat_type} on camera {camera_id}",
-                        })
-                        logger.warning(f"THREAT ALERT: {threat_type} on camera {camera_id}")
+                        is_fire_threat = threat_type in ('FIRE', 'FLAME', 'SMOKE', 'LIGHTER')
+                        alert_type = 'FIRE_DETECTED' if is_fire_threat else 'WEAPON_DETECTED'
+                        threat_key = f"{camera_id}:{threat_type}"
+                        if (now - last_threat_alert_time.get(threat_key, 0)) >= 5.0:
+                            last_threat_alert_time[threat_key] = now
+                            msg = (
+                                f"🔥 FIRE DETECTED: {threat_type} on camera {camera_id}"
+                                if is_fire_threat
+                                else f"⚠️ WEAPON DETECTED: {threat_type} on camera {camera_id}"
+                            )
+                            await sio.emit("threat_alert", {
+                                "camera_id": camera_id,
+                                "alert_type": alert_type,
+                                "object_type": threat_type,
+                                "confidence": float(threat_det.get('confidence', 0)),
+                                "box": threat_det.get('smooth_box', threat_det.get('box')),
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "severity": "CRITICAL",
+                                "message": msg,
+                            })
+                            logger.warning(f"THREAT ALERT: {threat_type} ({alert_type}) on camera {camera_id}")
 
-                # Trigger clip recording
-                if visible_tracked and sio.connected:
+                # Trigger clip recording (debounced to at most once per 30s)
+                if visible_tracked and sio.connected and (now - last_recording_triggered >= 30.0):
+                    last_recording_triggered = now
                     await sio.emit("start_recording", {
                         "camera_id": camera_id,
                         "duration_sec": 30,
@@ -826,9 +929,6 @@ async def process_camera(camera: dict):
                             "timestamp":   datetime.now(timezone.utc).isoformat(),
                         })
 
-                # Publish current boxes before optional slower enrichment work.
-                last_tracked_for_display = list(visible_tracked)
-                last_detection_masks = masks
                 # Consume completed work without awaiting a slow model. Results
                 # retain source time and are dropped after privacy-mask changes.
                 completed = enrichment.result()
@@ -845,10 +945,10 @@ async def process_camera(camera: dict):
                         await sio.emit('plate_detected', {**evt, 'camera_id': camera_id, 'timestamp': source_time})
                     for evt in identities:
                         await sio.emit('reid_match', {**evt, 'camera_id': camera_id, 'timestamp': source_time})
-                if time.monotonic() - last_auxiliary_run >= 1.0:
+                if time.monotonic() - last_auxiliary_run >= 2.5:
                     if enrichment.submit(analyze_enrichment, frame, [dict(d) for d in visible_tracked],
                                          camera_id, [dict(m) for m in masks], datetime.now(timezone.utc).isoformat(),
-                                         stream.frame_count % 3 == 0):
+                                         stream.frame_count % 6 == 0):
                         last_auxiliary_run = time.monotonic()
 
                 # ── Traffic congestion ───────────────────────────────────────────
@@ -908,8 +1008,9 @@ async def process_camera(camera: dict):
                                            "message": f"⚠️ FIGHT DETECTED on camera {camera_id}"})
                             logger.warning(f"FIGHT DETECTED on camera {camera_id}")
 
-                # ── PPE compliance ───────────────────────────────────────────────
-                if visible_tracked:
+                # ── PPE compliance (throttled to 1Hz) ─────────────────────────────
+                if visible_tracked and (time.monotonic() - last_ppe_run >= 1.0):
+                    last_ppe_run = time.monotonic()
                     for evt in await loop.run_in_executor(None, ppe_detector.analyze, visible_tracked, frame):
                         if sio.connected:
                             await sio.emit("safety_event", {
@@ -927,13 +1028,11 @@ async def process_camera(camera: dict):
                         object_type=det.get("object_type", "unknown"),
                     )
 
-                # Update display overlay for stream publisher (shallow copy, not reference)
-                last_tracked_for_display = list(visible_tracked)
-                last_detection_masks = masks
-
                 speed_estimator.cleanup(active_track_ids)
                 wrongway_detector.cleanup(active_track_ids)
                 fall_detector.cleanup(active_track_ids)
+                for tid in [k for k in last_track_detection_emitted if k not in active_track_ids]:
+                    del last_track_detection_emitted[tid]
 
                 consecutive_errors = 0
                 # Yield 1ms so stream publisher + socket IO can fire between inferences

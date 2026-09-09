@@ -40,8 +40,11 @@ export class AlertsService {
     ruleType?: string,
   ): AlertSeverity {
     const type = objectType.toLowerCase();
-
-    if (['knife', 'scissors', 'gun', 'weapon'].includes(type)) {
+    if ([
+      'knife', 'scissors', 'gun', 'weapon', 'handgun', 'pistol', 'rifle', 'firearm',
+      'sword', 'axe', 'bat', 'baseball bat', 'blade', 'dagger', 'machete',
+      'fire', 'flame', 'smoke', 'lighter', 'fire_detected', 'weapon_detected'
+    ].some(k => type.includes(k))) {
       return AlertSeverity.CRITICAL;
     }
 
@@ -84,12 +87,13 @@ export class AlertsService {
       )
         severity = AlertSeverity.CRITICAL;
       else if (
-        type.includes('UNKNOWN_FACE') ||
         type.includes('PPE_VIOLATION') ||
         type.includes('WRONG_WAY') ||
         type.includes('SPEED_VIOLATION')
       )
         severity = AlertSeverity.HIGH;
+      else if (type.includes('UNKNOWN_FACE'))
+        severity = AlertSeverity.LOW;
       else if (type.includes('CONGESTION'))
         severity = type.includes('CRITICAL')
           ? AlertSeverity.HIGH

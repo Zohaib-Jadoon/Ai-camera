@@ -151,6 +151,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
         this.logger.error(`Failed to create alert for detection: ${err.message}`),
       );
 
+      this.server.emit('detection', { ...payload, id: detection.id });
       this.server.emit('alert', { ...payload, detection_id: detection.id });
     } catch (err) {
       this.logger.error(`Failed to persist detection: ${err.message}`);

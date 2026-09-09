@@ -1,11 +1,12 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  Settings, Maximize2,
+  Settings, Maximize2, Minimize2, Scan,
   ShieldAlert, Info, WifiOff, Volume2, VolumeX,
-  RotateCcw, ZoomIn, Camera, Loader2, Download, Eye, Layers
+  RotateCcw, ZoomIn, Camera, Loader2, Download, Eye, Layers,
+  LayoutGrid, Grid
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence, Variants } from 'framer-motion';
@@ -26,12 +27,7 @@ const TYPE_COLORS: Record<string, string> = {
 
 const containerVariants: Variants = {
   hidden: { opacity: 0 },
-  visible: { opacity: 1, transition: { staggerChildren: 0.08 } },
-};
-
-const itemVariants: Variants = {
-  hidden: { opacity: 0, scale: 0.96, y: 8 },
-  visible: { opacity: 1, scale: 1, y: 0, transition: { type: 'spring', stiffness: 320, damping: 24 } },
+  visible: { opacity: 1 },
 };
 
 function CameraFeed({
@@ -39,12 +35,14 @@ function CameraFeed({
   isOnline,
   refreshTrigger,
   isZoomed,
+  fitMode = 'contain',
   onFrameUpdate
 }: {
   cameraId: string;
   isOnline: boolean;
   refreshTrigger: number;
   isZoomed: boolean;
+  fitMode?: 'contain' | 'cover';
   onFrameUpdate?: (cameraId: string, dataUrl: string) => void;
 }) {
   const imgRef = useRef<HTMLImageElement>(null);
@@ -127,7 +125,6 @@ function CameraFeed({
       if (payload.camera_id !== cameraId) return;
       lastReceivedAt = performance.now();
       setStalled(false);
-      // Bound pending work to one frame: prefer current footage over a backlog.
       pendingFrame = `data:image/jpeg;base64,${payload.data}`;
       if (renderRequest === null) renderRequest = requestAnimationFrame(renderLatestFrame);
     };
@@ -174,7 +171,8 @@ function CameraFeed({
         ref={imgRef}
         alt="Live camera feed"
         className={cn(
-          "absolute inset-0 w-full h-full object-cover transition-transform duration-300",
+          "absolute inset-0 w-full h-full transition-transform duration-300 pointer-events-none select-none",
+          fitMode === 'cover' ? "object-cover" : "object-contain",
           isZoomed ? "scale-150 z-20" : "scale-100",
           !hasFrame ? "opacity-0" : "opacity-100"
         )}
@@ -200,7 +198,8 @@ function CameraFeed({
 
 export default function LiveMonitoring() {
   const router = useRouter();
-  const [layout, setLayout] = useState<'2x2' | '3x2' | '1+3'>('2x2');
+  const [layout, setLayout] = useState<'auto' | '1x1' | '2x2' | '3x2' | '1+3'>('auto');
+  const [fitMode, setFitMode] = useState<'contain' | 'cover'>('contain');
   const [selectedCam, setSelectedCam] = useState<string | null>(null);
   const [muted, setMuted] = useState(true);
   const [refreshTriggers, setRefreshTriggers] = useState<Record<string, number>>({});
@@ -208,6 +207,12 @@ export default function LiveMonitoring() {
   const [showEventSidebar, setShowEventSidebar] = useState(true);
   const qc = useQueryClient();
   const [activeThreats, setActiveThreats] = useState<Record<string, { active: boolean; type: string; message: string }>>({});
+  const threatTimers = useRef<Record<string, NodeJS.Timeout>>({});
+
+  const { data: rawCameras = [], isLoading: camsLoading } = useCameras();
+  const { data: initialEvents = [] } = useDetections(30);
+  const [liveEvents, setLiveEvents] = useState<any[]>([]);
+  const [liveCamCounts, setLiveCamCounts] = useState<Record<string, number>>({});
 
   // Play urgent multi-burst emergency siren
   const playThreatSiren = useCallback(() => {
@@ -216,7 +221,6 @@ export default function LiveMonitoring() {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (!AudioCtx) return;
       const ctx = new AudioCtx();
-      // Three-burst siren pattern
       [0, 0.55, 1.1].forEach((startOffset) => {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
@@ -236,6 +240,46 @@ export default function LiveMonitoring() {
     } catch {}
   }, []);
 
+  const clearThreat = useCallback((camId: string) => {
+    if (threatTimers.current[camId]) {
+      clearTimeout(threatTimers.current[camId]);
+      delete threatTimers.current[camId];
+    }
+    setActiveThreats(prev => ({ ...prev, [camId]: { active: false, type: '', message: '' } }));
+  }, []);
+
+  const triggerThreat = useCallback((camId: string, objType: string, threatMsg: string) => {
+    if (!camId) return;
+    setActiveThreats(prev => ({ ...prev, [camId]: { active: true, type: objType.toUpperCase(), message: threatMsg } }));
+    if (!muted) playThreatSiren();
+    if (threatTimers.current[camId]) {
+      clearTimeout(threatTimers.current[camId]);
+    }
+    threatTimers.current[camId] = setTimeout(() => {
+      clearThreat(camId);
+    }, 4500);
+  }, [muted, playThreatSiren, clearThreat]);
+
+  useEffect(() => {
+    if (initialEvents && initialEvents.length > 0) {
+      setLiveEvents(prev => {
+        const seen = new Set<string>();
+        const merged: any[] = [];
+        for (const ev of [...prev, ...initialEvents]) {
+          if (ev && ev.id) {
+            if (!seen.has(ev.id)) {
+              seen.add(ev.id);
+              merged.push(ev);
+            }
+          } else if (ev) {
+            merged.push(ev);
+          }
+        }
+        return merged.slice(0, 50);
+      });
+    }
+  }, [initialEvents]);
+
   // Real-time camera status and threat alert WebSocket listeners
   useEffect(() => {
     const socket = getSocket();
@@ -247,23 +291,14 @@ export default function LiveMonitoring() {
           cam.id === payload.camera_id ? { ...cam, status: payload.status } : cam
         );
       });
-      qc.invalidateQueries({ queryKey: ['cameras'] });
-    };
-
-    const triggerThreat = (camId: string, objType: string, threatMsg: string) => {
-      if (!camId) return;
-      setActiveThreats(prev => ({ ...prev, [camId]: { active: true, type: objType.toUpperCase(), message: threatMsg } }));
-      if (!muted) playThreatSiren();
-      setTimeout(() => {
-        setActiveThreats(prev => ({ ...prev, [camId]: { active: false, type: '', message: '' } }));
-      }, 12000);
     };
 
     const alertHandler = (payload: any) => {
       const objType = (payload.object_type || payload.alert_type || '').toUpperCase();
       const isThreat = ['INTRUSION', 'WEAPON', 'KNIFE', 'GUN', 'FIGHT', 'FALL', 'SCISSORS',
-        'HANDGUN', 'PISTOL', 'RIFLE', 'FIREARM', 'SWORD', 'AXE', 'BAT', 'BASEBALL BAT', 'CONGESTION', 'TRAFFIC',
-        'WEAPON_DETECTED', 'FIGHT_DETECTED', 'FALL_DETECTED'
+        'HANDGUN', 'PISTOL', 'RIFLE', 'FIREARM', 'SWORD', 'AXE', 'BAT', 'BASEBALL BAT',
+        'BLADE', 'DAGGER', 'MACHETE', 'FIRE', 'FLAME', 'SMOKE', 'LIGHTER', 'FIRE_DETECTED',
+        'CONGESTION', 'TRAFFIC', 'WEAPON_DETECTED', 'FIGHT_DETECTED', 'FALL_DETECTED'
       ].some(t => objType.includes(t));
 
       if (isThreat && payload.camera_id) {
@@ -272,8 +307,9 @@ export default function LiveMonitoring() {
     };
 
     const threatHandler = (payload: any) => {
-      const objType = (payload.object_type || 'WEAPON').toUpperCase();
-      triggerThreat(payload.camera_id, objType, payload.message || `⚠️ CRITICAL: ${objType} DETECTED`);
+      const objType = (payload.object_type || (payload.alert_type === 'FIRE_DETECTED' ? 'FIRE' : 'WEAPON')).toUpperCase();
+      const isFire = ['FIRE', 'FLAME', 'SMOKE', 'LIGHTER', 'FIRE_DETECTED'].some(t => objType.includes(t));
+      triggerThreat(payload.camera_id, objType, payload.message || (isFire ? `🔥 CRITICAL: FIRE DETECTED` : `⚠️ CRITICAL: ${objType} DETECTED`));
     };
 
     const congestionHandler = (payload: any) => {
@@ -290,38 +326,104 @@ export default function LiveMonitoring() {
       triggerThreat(payload.camera_id, evtType, `⚠️ SAFETY EVENT: ${evtType}`);
     };
 
+    const handleIncomingDetection = (payload: any) => {
+      if (!payload) return;
+      const camId = payload.camera_id;
+      const objType = (payload.object_type || payload.alert_type || 'object').toLowerCase();
+      const newEv = {
+        id: payload.detection_id || payload.id || `live-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        camera_id: camId,
+        camera: rawCameras.find(c => c.id === camId) || { name: camId?.slice(0, 8) || 'Camera' },
+        object_type: objType,
+        confidence: payload.confidence ?? 0.85,
+        timestamp: payload.timestamp || new Date().toISOString(),
+      };
+
+      setLiveEvents(prev => {
+        const filtered = prev.filter(e => e.id !== newEv.id);
+        return [newEv, ...filtered].slice(0, 50);
+      });
+      if (camId) {
+        setLiveCamCounts(prev => ({
+          ...prev,
+          [camId]: (prev[camId] ?? 0) + 1,
+        }));
+      }
+    };
+
+    const onAlert = (payload: any) => {
+      alertHandler(payload);
+      handleIncomingDetection(payload);
+    };
+
+    const onThreatAlert = (payload: any) => {
+      threatHandler(payload);
+      handleIncomingDetection(payload);
+    };
+
     socket.on('camera_status', statusHandler);
-    socket.on('alert', alertHandler);
-    socket.on('threat_alert', threatHandler);
+    socket.on('alert', onAlert);
+    socket.on('threat_alert', onThreatAlert);
+    socket.on('detection', handleIncomingDetection);
     socket.on('congestion', congestionHandler);
     socket.on('intrusion', intrusionHandler);
     socket.on('safety_event', safetyHandler);
 
     return () => {
       socket.off('camera_status', statusHandler);
-      socket.off('alert', alertHandler);
-      socket.off('threat_alert', threatHandler);
+      socket.off('alert', onAlert);
+      socket.off('threat_alert', onThreatAlert);
+      socket.off('detection', handleIncomingDetection);
       socket.off('congestion', congestionHandler);
       socket.off('intrusion', intrusionHandler);
       socket.off('safety_event', safetyHandler);
+      Object.values(threatTimers.current).forEach(clearTimeout);
     };
-  }, [qc, muted, playThreatSiren]);
+  }, [qc, muted, playThreatSiren, clearThreat, triggerThreat, rawCameras]);
 
-  const { data: cameras = [], isLoading: camsLoading } = useCameras();
-  const { data: events = [] } = useDetections(30);
+  // IMMUTABLE CAMERA SORTING: Guarantees cameras NEVER swap positions or move when alerts occur
+  const cameras = useMemo(() => {
+    return [...rawCameras].sort((a, b) => {
+      if (a.createdAt && b.createdAt) {
+        const timeA = new Date(a.createdAt).getTime();
+        const timeB = new Date(b.createdAt).getTime();
+        if (timeA !== timeB) return timeA - timeB;
+      }
+      const nameComp = (a.name || '').localeCompare(b.name || '');
+      if (nameComp !== 0) return nameComp;
+      return (a.id || '').localeCompare(b.id || '');
+    });
+  }, [rawCameras]);
+
+  // Set default selected camera
+  useEffect(() => {
+    if (cameras.length > 0 && !selectedCam) {
+      setSelectedCam(cameras[0].id);
+    }
+  }, [cameras, selectedCam]);
 
   const gridClass = {
+    'auto': cameras.length <= 1
+      ? 'grid-cols-1'
+      : cameras.length === 2
+      ? 'grid-cols-1 md:grid-cols-2'
+      : cameras.length <= 4
+      ? 'grid-cols-1 md:grid-cols-2'
+      : 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3',
+    '1x1': 'grid-cols-1',
     '2x2': 'grid-cols-1 md:grid-cols-2',
-    '3x2': 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3',
+    '3x2': 'grid-cols-1 sm:grid-cols-2 xl:grid-cols-3',
     '1+3': 'grid-cols-1 lg:grid-cols-4',
   };
 
-  const detectionsByCam = events.reduce<Record<string, number>>((acc, ev) => {
-    if (ev.camera_id) {
-      acc[ev.camera_id] = (acc[ev.camera_id] ?? 0) + 1;
-    }
-    return acc;
-  }, {});
+  const detectionsByCam = useMemo(() => {
+    return (initialEvents as any[]).reduce<Record<string, number>>((acc, ev) => {
+      if (ev.camera_id) {
+        acc[ev.camera_id] = (acc[ev.camera_id] ?? 0) + 1;
+      }
+      return acc;
+    }, {});
+  }, [initialEvents]);
 
   const handleFullscreen = (e: React.MouseEvent, camId: string) => {
     e.stopPropagation();
@@ -360,12 +462,31 @@ export default function LiveMonitoring() {
     a.click();
   };
 
+  // Double click toggles between single camera focus (1x1) and multi-camera grid
+  const handleCardDoubleClick = (camId: string) => {
+    if (layout === '1x1') {
+      setLayout('auto');
+    } else {
+      setSelectedCam(camId);
+      setLayout('1x1');
+    }
+  };
+
+  const displayedCameras = useMemo(() => {
+    if (layout === '1x1') {
+      const found = cameras.find(c => c.id === selectedCam);
+      return found ? [found] : (cameras[0] ? [cameras[0]] : []);
+    }
+    return cameras;
+  }, [layout, cameras, selectedCam]);
+
   return (
-    <motion.div variants={containerVariants} initial="hidden" animate="visible" className="h-full flex flex-col gap-5">
+    <div className="h-full flex flex-col gap-4">
       <EngineHealthBanner />
+
       {/* Top Header Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 flex-shrink-0 bg-slate-900/40 backdrop-blur-md border border-slate-800/80 p-4 rounded-2xl shadow-xl">
-        <motion.div variants={itemVariants}>
+        <div>
           <div className="flex items-center gap-3">
             <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight">
               Live <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-cyan-400 to-indigo-400">Monitoring</span>
@@ -373,26 +494,42 @@ export default function LiveMonitoring() {
           </div>
           <p className="text-slate-400 font-medium text-xs sm:text-sm mt-1">
             {camsLoading ? 'Loading cameras...' : `${cameras.filter((c) => c.status === 'ONLINE').length} of ${cameras.length} cameras online`}
+            {layout === '1x1' && selectedCam && (
+              <span className="ml-2 text-blue-400 font-bold">• Single Focus Mode (Double-click feed to return)</span>
+            )}
           </p>
-        </motion.div>
+        </div>
 
         {/* Toolbar controls */}
-        <motion.div variants={itemVariants} className="flex items-center gap-3 flex-wrap">
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Layout Switcher */}
           <div className="flex bg-slate-950/90 border border-slate-800/90 rounded-xl p-1 shadow-inner">
-            {(['2x2', '3x2', '1+3'] as const).map((l) => (
+            {(['auto', '1x1', '2x2', '3x2', '1+3'] as const).map((l) => (
               <button
                 key={l}
                 onClick={() => setLayout(l)}
                 className={cn(
-                  'px-3 py-1.5 text-xs font-bold rounded-lg transition-all duration-200',
+                  'px-3 py-1.5 text-xs font-bold rounded-lg transition-all duration-200 capitalize',
                   layout === l ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30' : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
                 )}
+                title={`Switch to ${l} layout`}
               >
                 {l}
               </button>
             ))}
           </div>
 
+          {/* Aspect Fit/Fill Toggle */}
+          <button
+            onClick={() => setFitMode(prev => prev === 'contain' ? 'cover' : 'contain')}
+            className="px-3 py-2 rounded-xl bg-slate-950/90 border border-slate-800/90 text-xs font-bold text-slate-300 hover:text-white hover:bg-slate-800/60 transition-colors shadow-inner flex items-center gap-1.5"
+            title={fitMode === 'contain' ? "Fit Mode: Entire image visible (letterboxed). Click to Fill" : "Fill Mode: Crops edges to fill card. Click to Fit"}
+          >
+            <Scan className="w-3.5 h-3.5 text-blue-400" />
+            <span className="capitalize">{fitMode}</span>
+          </button>
+
+          {/* Audio Alert Toggle */}
           <button
             onClick={() => setMuted(!muted)}
             className="p-2.5 rounded-xl bg-slate-950/90 border border-slate-800/90 text-slate-400 hover:text-white hover:bg-slate-800/60 transition-colors shadow-inner"
@@ -401,6 +538,7 @@ export default function LiveMonitoring() {
             {muted ? <VolumeX className="w-4.5 h-4.5" /> : <Volume2 className="w-4.5 h-4.5 text-blue-400" />}
           </button>
 
+          {/* Toggle Sidebar */}
           <button
             onClick={() => setShowEventSidebar(!showEventSidebar)}
             className={cn(
@@ -414,7 +552,7 @@ export default function LiveMonitoring() {
             <Layers className="w-4.5 h-4.5" />
             <span className="hidden sm:inline">Events</span>
           </button>
-        </motion.div>
+        </div>
       </div>
 
       {/* Main Monitoring Body */}
@@ -444,47 +582,107 @@ export default function LiveMonitoring() {
             </button>
           </div>
         ) : (
-          <div className={cn('flex-1 grid gap-4 transition-all duration-300 overflow-y-auto pr-1 scrollbar-hide auto-rows-max', gridClass[layout])}>
-            <AnimatePresence mode="popLayout">
-              {cameras.map((cam) => {
+          <div className="flex-1 flex flex-col gap-3 min-h-0 overflow-hidden">
+            {/* 1x1 Quick Switcher Bar */}
+            {layout === '1x1' && (
+              <div className="flex items-center gap-2 overflow-x-auto py-1 px-2 bg-slate-900/60 backdrop-blur-md rounded-xl border border-slate-800/80 flex-shrink-0">
+                <button
+                  onClick={() => setLayout('auto')}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors shadow-sm"
+                  title="Return to Grid Layout"
+                >
+                  <Minimize2 className="w-3.5 h-3.5 text-blue-400" /> Grid View
+                </button>
+                <div className="h-4 w-[1px] bg-slate-700 mx-1" />
+                {cameras.map((cam) => {
+                  const isCurrent = (selectedCam || cameras[0]?.id) === cam.id;
+                  const threatInfo = activeThreats[cam.id];
+                  return (
+                    <button
+                      key={cam.id}
+                      onClick={() => setSelectedCam(cam.id)}
+                      className={cn(
+                        "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-2 whitespace-nowrap",
+                        threatInfo?.active
+                          ? "bg-red-600 text-white animate-pulse shadow-lg shadow-red-600/40"
+                          : isCurrent
+                          ? "bg-blue-600 text-white shadow-md shadow-blue-600/30"
+                          : "bg-slate-950/70 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800/60"
+                      )}
+                    >
+                      <span className={cn(
+                        "w-2 h-2 rounded-full",
+                        threatInfo?.active ? "bg-white" : cam.status === 'ONLINE' ? "bg-emerald-400" : "bg-red-500"
+                      )} />
+                      {cam.name}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Grid Container */}
+            <div className={cn('flex-1 grid gap-4 overflow-y-auto pr-1 scrollbar-hide', gridClass[layout])}>
+              {displayedCameras.map((cam) => {
                 const isOnline = cam.status === 'ONLINE';
                 const threatInfo = activeThreats[cam.id];
                 const isThreatActive = !!threatInfo?.active;
-                const detCount = detectionsByCam[cam.id] ?? 0;
+                const detCount = (detectionsByCam[cam.id] ?? 0) + (liveCamCounts[cam.id] ?? 0);
+                const isHero = layout === '1+3' && cam.id === (selectedCam || cameras[0]?.id);
+                const isSelected = selectedCam === cam.id;
+
                 return (
-                  <motion.div
-                    layout
-                    variants={itemVariants}
+                  <div
                     key={cam.id}
                     id={`cam-card-${cam.id}`}
                     onClick={() => setSelectedCam(cam.id)}
+                    onDoubleClick={() => handleCardDoubleClick(cam.id)}
                     className={cn(
-                      'relative rounded-2xl overflow-hidden cursor-pointer group transition-all duration-300 flex flex-col',
-                      'border shadow-2xl bg-slate-950',
+                      'relative rounded-2xl overflow-hidden cursor-pointer group flex flex-col',
+                      'border shadow-2xl bg-slate-950 select-none transition-colors duration-200',
                       isThreatActive
-                        ? 'border-red-500 ring-4 ring-red-600/80 animate-pulse shadow-[0_0_50px_rgba(239,68,68,0.8)]'
-                        : 'border-slate-800/80',
-                      layout === '1+3' && cam.id === cameras[0]?.id ? 'lg:col-span-3 lg:row-span-2' : '',
-                      selectedCam === cam.id ? 'ring-2 ring-blue-500 shadow-blue-500/20' : 'hover:border-slate-700',
-                      !isOnline ? 'opacity-70' : ''
+                        ? 'border-red-500 ring-4 ring-red-600/80 shadow-[0_0_40px_rgba(239,68,68,0.7)]'
+                        : isSelected
+                        ? 'border-blue-500/80 ring-2 ring-blue-500/50'
+                        : 'border-slate-800/80 hover:border-slate-700',
+                      isHero ? 'lg:col-span-3 lg:row-span-3' : '',
+                      !isOnline ? 'opacity-75' : ''
                     )}
                   >
-                    {/* Widescreen 16:9 Video Canvas Container */}
-                    <div className="w-full aspect-video flex items-center justify-center relative bg-[#020617] overflow-hidden">
+                    {/* Video Canvas Container */}
+                    <div className={cn(
+                      "w-full flex items-center justify-center relative bg-black overflow-hidden",
+                      layout === '1x1' ? "flex-1 min-h-[420px] aspect-auto" : "aspect-video"
+                    )}>
                       <CameraFeed
                         cameraId={cam.id}
                         isOnline={isOnline}
                         refreshTrigger={refreshTriggers[cam.id] ?? 0}
                         isZoomed={!!zoomedCams[cam.id]}
+                        fitMode={fitMode}
                       />
-                      {/* Bright Red Flashing Strobe Overlay for ANY Weapon, Fighting, Traffic Congestion or Intrusion */}
+
+                      {/* Floating Threat Alert Banner at top with dismiss button */}
                       {isThreatActive && (
-                        <div className="absolute inset-0 pointer-events-none z-30 bg-red-600/30 border-[8px] border-red-600 animate-pulse shadow-[inset_0_0_90px_rgba(239,68,68,0.95)] flex items-center justify-center">
-                          <div className="bg-red-600/90 text-white font-black text-xs px-4 py-2 rounded-xl border border-red-400 shadow-2xl animate-bounce flex items-center gap-2">
-                            <ShieldAlert className="w-5 h-5" />
-                            <span>CRITICAL ALERT: {threatInfo?.type || 'THREAT'}</span>
+                        <>
+                          <div className="absolute inset-0 pointer-events-none z-20 bg-red-600/15 border-[4px] border-red-600 animate-pulse shadow-[inset_0_0_50px_rgba(239,68,68,0.7)]" />
+                          <div className="absolute top-12 left-1/2 -translate-x-1/2 z-30 pointer-events-auto">
+                            <div className="bg-red-600/95 text-white font-black text-xs px-3.5 py-1.5 rounded-xl border border-red-400 shadow-2xl flex items-center gap-2.5 backdrop-blur-md">
+                              <ShieldAlert className="w-4 h-4 text-white animate-pulse flex-shrink-0" />
+                              <span className="tracking-wide uppercase whitespace-nowrap">CRITICAL: {threatInfo?.type || 'THREAT'}</span>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  clearThreat(cam.id);
+                                }}
+                                className="ml-1.5 px-2 py-0.5 bg-red-800/90 hover:bg-red-700 text-white rounded text-[10px] font-bold border border-red-400/60 transition-colors shadow flex items-center gap-1"
+                                title="Dismiss threat alert"
+                              >
+                                ✕ Dismiss
+                              </button>
+                            </div>
                           </div>
-                        </div>
+                        </>
                       )}
                     </div>
 
@@ -516,14 +714,24 @@ export default function LiveMonitoring() {
                         </span>
                       </div>
 
-                      {/* Hover controls bar */}
-                      <div className="opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex items-center gap-1.5 pointer-events-auto">
+                      {/* Interactive Controls bar */}
+                      <div className="flex items-center gap-1.5 pointer-events-auto">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCardDoubleClick(cam.id);
+                          }}
+                          className="w-8 h-8 bg-slate-950/90 backdrop-blur-md border border-slate-800 rounded-lg flex items-center justify-center text-slate-300 hover:text-white hover:bg-blue-600 transition-all shadow-lg"
+                          title={layout === '1x1' ? "Return to Grid (or Double Click)" : "Focus Single Camera (or Double Click)"}
+                        >
+                          {layout === '1x1' ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+                        </button>
                         <button
                           onClick={(e) => handleFullscreen(e, cam.id)}
                           className="w-8 h-8 bg-slate-950/90 backdrop-blur-md border border-slate-800 rounded-lg flex items-center justify-center text-slate-300 hover:text-white hover:bg-blue-600 transition-all shadow-lg"
-                          title="Fullscreen Mode"
+                          title="Full Screen Window"
                         >
-                          <Maximize2 className="w-3.5 h-3.5" />
+                          <Scan className="w-3.5 h-3.5" />
                         </button>
                         <button
                           onClick={(e) => handleZoomToggle(e, cam.id)}
@@ -565,20 +773,16 @@ export default function LiveMonitoring() {
                         {cam.location || 'Default Zone'}
                       </span>
                     </div>
-                  </motion.div>
+                  </div>
                 );
               })}
-            </AnimatePresence>
+            </div>
           </div>
         )}
 
         {/* Live Event Sidebar */}
         {showEventSidebar && (
-          <motion.div
-            initial={{ opacity: 0, x: 20 }}
-            animate={{ opacity: 1, x: 0 }}
-            className="w-80 flex flex-col bg-slate-900/40 backdrop-blur-md rounded-2xl border border-slate-800/80 overflow-hidden flex-shrink-0 shadow-2xl"
-          >
+          <div className="w-80 flex flex-col bg-slate-900/40 backdrop-blur-md rounded-2xl border border-slate-800/80 overflow-hidden flex-shrink-0 shadow-2xl">
             <div className="p-4 border-b border-slate-800/80 flex items-center gap-3 bg-slate-950/60">
               <div className="p-1.5 rounded-lg bg-blue-500/20 border border-blue-500/30">
                 <Info className="w-4 h-4 text-blue-400" />
@@ -591,21 +795,20 @@ export default function LiveMonitoring() {
             </div>
 
             <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-hide">
-              {events.length === 0 ? (
+              {liveEvents.length === 0 ? (
                 <div className="flex flex-col items-center justify-center h-full gap-2 text-slate-500 py-12 text-center">
                   <ShieldAlert className="w-8 h-8 opacity-40 text-slate-600" />
                   <p className="text-xs font-medium">No live AI detections yet</p>
                 </div>
               ) : (
-                events.map((ev) => {
+                liveEvents.map((ev, idx) => {
                   const colorClass = TYPE_COLORS[ev.object_type] ?? 'text-slate-400 bg-slate-800/50 border-slate-700';
                   const camName = ev.camera?.name ?? ev.camera_id?.slice(0, 8) ?? 'Unknown';
                   const ts = new Date(ev.timestamp).toLocaleTimeString();
+                  const eventKey = `${ev.id || 'ev'}-${idx}`;
                   return (
-                    <motion.div
-                      initial={{ opacity: 0, x: 15 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      key={ev.id}
+                    <div
+                      key={eventKey}
                       className="p-3 rounded-xl border border-slate-800/80 bg-slate-950/60 hover:bg-slate-800/60 transition-all cursor-pointer group"
                     >
                       <div className="flex items-center justify-between mb-2">
@@ -621,14 +824,14 @@ export default function LiveMonitoring() {
                         </div>
                         <span className="text-[10px] text-blue-400 font-mono font-extrabold">{((ev.confidence ?? 0.8) * 100).toFixed(0)}%</span>
                       </div>
-                    </motion.div>
+                    </div>
                   );
                 })
               )}
             </div>
-          </motion.div>
+          </div>
         )}
       </div>
-    </motion.div>
+    </div>
   );
 }

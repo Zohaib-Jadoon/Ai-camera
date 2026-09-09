@@ -140,7 +140,11 @@ def train_sop(
     map50 = None
     try:
         # results.results_dict may contain 'metrics/mAP50(B)'
-        map50 = float(results.results_dict.get("metrics/mAP50(B)", 0))
+        r_dict = getattr(results, "results_dict", None)
+        if isinstance(r_dict, dict):
+            map50 = float(r_dict.get("metrics/mAP50(B)", 0))
+        elif isinstance(results, dict):
+            map50 = float(results.get("metrics/mAP50(B)", 0))
     except Exception:
         pass
 

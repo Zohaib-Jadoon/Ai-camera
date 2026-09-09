@@ -16,7 +16,7 @@ COCO Keypoint indices (17-point skeleton used by YOLOv8-Pose):
 import logging
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -294,18 +294,16 @@ class PPEConfig:
     # Minimum area ratio of "bright" pixels in torso region to flag as having a vest
     vest_brightness_threshold: float = 0.3
     # HSV ranges for high-vis colors (yellow/orange/green)
-    hivis_hue_ranges: list[tuple[int, int]] = None  # type: ignore
+    hivis_hue_ranges: list[tuple[int, int]] = field(
+        default_factory=lambda: [
+            (15, 35),    # yellow
+            (5, 15),     # orange  
+            (35, 85),    # green
+        ]
+    )
     cooldown_sec: float = 60.0
     # Number of consecutive "no-PPE" frames before alert
     consecutive_frames: int = 15
-
-    def __post_init__(self):
-        if self.hivis_hue_ranges is None:
-            self.hivis_hue_ranges = [
-                (15, 35),    # yellow
-                (5, 15),     # orange  
-                (35, 85),    # green
-            ]
 
 
 class PPEDetector:

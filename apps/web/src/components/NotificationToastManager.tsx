@@ -105,10 +105,11 @@ export default function NotificationToastManager() {
   const qc = useQueryClient();
 
   const addToast = useCallback((toast: Omit<AlertToast, 'id' | 'timestamp'>) => {
-    // Deduplication check — 15 seconds per alert type/camera to prevent toast spamming
+    // Deduplication check — 15s standard, 60s for unknown faces to prevent toast spamming
     const key = `${toast.cameraId || 'global'}-${toast.objectType || toast.title}`;
     const now = Date.now();
-    if (lastAlertTimes.current[key] && now - lastAlertTimes.current[key] < 15000) {
+    const cooldownMs = (toast.objectType?.includes('UNKNOWN_FACE')) ? 60000 : 15000;
+    if (lastAlertTimes.current[key] && now - lastAlertTimes.current[key] < cooldownMs) {
       return; // Skip duplicate toast during cooldown
     }
     lastAlertTimes.current[key] = now;
@@ -169,10 +170,14 @@ export default function NotificationToastManager() {
         severity = 'CRITICAL';
         title = `CRITICAL: ${objType.replace(/_/g, ' ')}`;
         msg = `Unpermitted security breach detected`;
-      } else if (objType.includes('PPE') || objType.includes('SPEED') || objType.includes('WRONG_WAY') || objType.includes('UNKNOWN_FACE')) {
+      } else if (objType.includes('PPE') || objType.includes('SPEED') || objType.includes('WRONG_WAY')) {
         severity = 'HIGH';
         title = `WARNING: ${objType.replace(/_/g, ' ')}`;
         msg = `Safety rule violation detected`;
+      } else if (objType.includes('UNKNOWN_FACE')) {
+        severity = 'LOW';
+        title = `Visitor Detected`;
+        msg = `Unenrolled face on camera ${payload.camera_id?.slice(0, 8) || 'feed'}`;
       } else if (objType.includes('KNOWN_FACE')) {
         severity = 'LOW';
         title = `Person Identified: ${payload.person_name || 'Registered Subject'}`;
@@ -217,7 +222,7 @@ export default function NotificationToastManager() {
   }, [addToast, qc]);
 
   return (
-    <div className="fixed top-4 right-4 z-50 flex flex-col gap-3 max-w-sm w-full pointer-events-none">
+    <div className="fixed bottom-5 right-5 z-50 flex flex-col-reverse gap-3 max-w-sm w-full pointer-events-none">
       <AnimatePresence mode="popLayout">
         {toasts.map((toast) => {
           const isCritical = toast.severity === 'CRITICAL';
@@ -244,9 +249,9 @@ export default function NotificationToastManager() {
             <motion.div
               key={toast.id}
               layout
-              initial={{ opacity: 0, x: 50, scale: 0.9 }}
-              animate={{ opacity: 1, x: 0, scale: 1 }}
-              exit={{ opacity: 0, x: 50, scale: 0.9 }}
+              initial={{ opacity: 0, y: 20, scale: 0.9 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 20, scale: 0.9 }}
               transition={{ type: 'spring', stiffness: 380, damping: 26 }}
               className={`pointer-events-auto rounded-2xl border p-4 backdrop-blur-xl shadow-2xl transition-all duration-200 ${cardBorder}`}
             >

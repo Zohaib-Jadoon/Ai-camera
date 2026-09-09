@@ -36,6 +36,7 @@ export class CameraService {
   async findAll(): Promise<Camera[]> {
     const cameras = await this.prisma.camera.findMany({
       include: { zones: true },
+      orderBy: { createdAt: 'asc' },
     });
     return cameras.map((cam) => this.decryptCamera(cam));
   }

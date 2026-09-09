@@ -13,7 +13,7 @@ configurable interval and builds a searchable embedding store.
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Any, Callable
 
 import numpy as np
 
@@ -38,7 +38,7 @@ if TORCH_AVAILABLE:
         logger.info("OpenAI CLIP available")
     except ImportError:
         try:
-            import open_clip
+            import open_clip  # pyright: ignore[reportMissingImports]
             CLIP_AVAILABLE = True
             logger.info("open_clip available (fallback)")
         except ImportError:
@@ -74,9 +74,9 @@ class CLIPSearchEngine:
 
     def __init__(self, config: Optional[CLIPConfig] = None):
         self.config = config or CLIPConfig()
-        self._model = None
-        self._preprocess = None
-        self._tokenize = None
+        self._model: Any = None
+        self._preprocess: Any = None
+        self._tokenize: Any = None
         self._device = "cpu"
         self._loaded = False
         self._index: list[FrameIndex] = []
@@ -102,7 +102,7 @@ class CLIPSearchEngine:
             logger.info(f"CLIP model loaded: {self.config.model_name} on {self._device}")
         except (ImportError, Exception):
             try:
-                import open_clip
+                import open_clip  # pyright: ignore[reportMissingImports]
                 self._model, _, self._preprocess = open_clip.create_model_and_transforms(
                     'ViT-B-32', pretrained='laion2b_s34b_b79k'
                 )
@@ -120,13 +120,13 @@ class CLIPSearchEngine:
         self,
         frame: np.ndarray,
         camera_id: str,
-        detections: list[dict] = None,
+        detections: list[dict] | None = None,
     ) -> bool:
         """
         Index a frame for later search. Call periodically from the processing loop.
         Returns True if the frame was indexed.
         """
-        if not self._loaded:
+        if not self._loaded or self._preprocess is None or self._model is None:
             return False
 
         now = time.time()
@@ -180,7 +180,7 @@ class CLIPSearchEngine:
         Search indexed frames using a natural language query.
         Returns: [{ camera_id, timestamp, similarity, detections }]
         """
-        if not self._loaded or not self._index:
+        if not self._loaded or not self._index or self._tokenize is None or self._model is None:
             return []
 
         try:

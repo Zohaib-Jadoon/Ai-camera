@@ -1,12 +1,10 @@
 {
   "include": ["src"],
   "exclude": ["**/__pycache__"],
-  "pythonVersion": "3.14",
+  "pythonVersion": "3.12",
   "pythonPlatform": "Windows",
-  "pythonPath": "C:/Users/CP/AppData/Local/Programs/Python/Python314/python.exe",
-  "extraPaths": [
-    "C:/Users/CP/AppData/Local/Programs/Python/Python314/Lib/site-packages"
-  ],
+  "venvPath": ".",
+  "venv": ".venv",
   "reportMissingImports": "warning",
   "reportMissingModuleSource": "none",
   "typeCheckingMode": "basic"

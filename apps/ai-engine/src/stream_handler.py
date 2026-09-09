@@ -1,6 +1,7 @@
 """Thread-backed capture with bounded freshness and interruptible reconnects."""
 from __future__ import annotations
 
+import os
 import logging
 import threading
 import time
@@ -40,6 +41,8 @@ class StreamHandler:
     def _open(self) -> bool:
         source = int(self.source) if str(self.source).isdigit() else self.source
         if isinstance(source, str):
+            # Enforce low-latency TCP RTSP capture with zero demuxer buffering
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;0"
             self._cap = cv2.VideoCapture(
                 source, cv2.CAP_FFMPEG,
                 [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
@@ -68,8 +71,9 @@ class StreamHandler:
         try:
             while not self._stop_event.is_set():
                 try:
-                    if self._cap is None and not self._open():
-                        raise RuntimeError("Capture unavailable")
+                    if self._cap is None:
+                        if not self._open() or self._cap is None:
+                            raise RuntimeError("Capture unavailable")
                     ret, frame = self._cap.read()
                     if not ret or frame is None or frame.size == 0:
                         raise RuntimeError("Frame unavailable")
