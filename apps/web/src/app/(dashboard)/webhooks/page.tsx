@@ -1,4 +1,5 @@
 'use client';
+import { runUiAction } from '@/lib/ui-action';
 
 import { useState } from 'react';
 import { Plus, Edit, Trash2, Loader2, Webhook, Send, X } from 'lucide-react';
@@ -223,7 +224,7 @@ export default function WebhooksPage() {
               Cancel
             </button>
             <button
-              onClick={handleSave}
+              onClick={() => runUiAction(handleSave)}
               disabled={createWebhook.isPending || updateWebhook.isPending}
               className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-medium px-4 py-2 rounded-lg transition-colors"
             >

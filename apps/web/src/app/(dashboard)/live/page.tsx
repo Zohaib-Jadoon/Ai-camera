@@ -12,6 +12,7 @@ import { motion, AnimatePresence, Variants } from 'framer-motion';
 import { useCameras, useDetections } from '@/hooks/use-api';
 import { useQueryClient } from '@tanstack/react-query';
 import { getSocket } from '@/lib/socket';
+import EngineHealthBanner from '@/components/EngineHealthBanner';
 
 const TYPE_COLORS: Record<string, string> = {
   person: 'text-red-400 bg-red-400/20 border-red-400/30',
@@ -50,6 +51,7 @@ function CameraFeed({
   const [hasFrame, setHasFrame] = useState(false);
   const hasFrameRef = useRef(false);
   const [fps, setFps] = useState<number>(0);
+  const [stalled, setStalled] = useState(false);
   const frameCountRef = useRef<number>(0);
   const lastFpsCalcRef = useRef<number>(Date.now());
   const onFrameUpdateRef = useRef(onFrameUpdate);
@@ -59,6 +61,13 @@ function CameraFeed({
   }, [onFrameUpdate]);
 
   useEffect(() => {
+    setHasFrame(false);
+    hasFrameRef.current = false;
+    setFps(0);
+    setStalled(false);
+    frameCountRef.current = 0;
+    lastFpsCalcRef.current = performance.now();
+    if (imgRef.current) imgRef.current.removeAttribute('src');
     if (!isOnline) {
       setHasFrame(false);
       hasFrameRef.current = false;
@@ -66,6 +75,17 @@ function CameraFeed({
     }
 
     const socket = getSocket();
+    let pendingFrame: string | null = null;
+    let renderRequest: number | null = null;
+    let lastReceivedAt = performance.now();
+
+    const markDisconnected = () => {
+      setStalled(true);
+      setFps(0);
+      pendingFrame = null;
+      if (renderRequest !== null) cancelAnimationFrame(renderRequest);
+      renderRequest = null;
+    };
 
     const joinRoom = () => {
       socket.emit('join-camera', cameraId);
@@ -75,35 +95,52 @@ function CameraFeed({
       joinRoom();
     }
     socket.on('connect', joinRoom);
+    socket.on('disconnect', markDisconnected);
 
-    const onFrame = (payload: { camera_id: string; data: string }) => {
-      if (payload.camera_id !== cameraId) return;
-      const dataUrl = `data:image/jpeg;base64,${payload.data}`;
-
-      if (imgRef.current) {
-        imgRef.current.src = dataUrl;
+    const healthTimer = window.setInterval(() => {
+      if (performance.now() - lastReceivedAt > 5000) {
+        setStalled(true);
+        setFps(0);
       }
+    }, 1000);
+
+    const renderLatestFrame = () => {
+      renderRequest = null;
+      if (pendingFrame === null || !imgRef.current) return;
+      imgRef.current.src = pendingFrame;
+      pendingFrame = null;
+      frameCountRef.current += 1;
       if (!hasFrameRef.current) {
         hasFrameRef.current = true;
         setHasFrame(true);
       }
-
-      // Calculate live FPS
-      frameCountRef.current += 1;
-      const now = Date.now();
-      if (now - lastFpsCalcRef.current >= 1000) {
-        setFps(frameCountRef.current);
+      const now = performance.now();
+      const elapsed = now - lastFpsCalcRef.current;
+      if (elapsed >= 1000) {
+        setFps(Math.round(frameCountRef.current * 1000 / elapsed));
         frameCountRef.current = 0;
         lastFpsCalcRef.current = now;
       }
+    };
+
+    const onFrame = (payload: { camera_id: string; data: string }) => {
+      if (payload.camera_id !== cameraId) return;
+      lastReceivedAt = performance.now();
+      setStalled(false);
+      // Bound pending work to one frame: prefer current footage over a backlog.
+      pendingFrame = `data:image/jpeg;base64,${payload.data}`;
+      if (renderRequest === null) renderRequest = requestAnimationFrame(renderLatestFrame);
     };
 
     socket.on('frame', onFrame);
 
     return () => {
       socket.off('connect', joinRoom);
+      socket.off('disconnect', markDisconnected);
       socket.off('frame', onFrame);
       socket.emit('leave-camera', cameraId);
+      window.clearInterval(healthTimer);
+      if (renderRequest !== null) cancelAnimationFrame(renderRequest);
     };
   }, [cameraId, isOnline, refreshTrigger]);
 
@@ -123,7 +160,7 @@ function CameraFeed({
 
   return (
     <>
-      {!hasFrame && (
+      {!hasFrame && !stalled && (
         <div className="flex flex-col items-center gap-3 text-slate-400 p-6 text-center absolute inset-0 justify-center z-10">
           <Loader2 className="w-9 h-9 animate-spin text-blue-400/80" />
           <div className="flex flex-col gap-1">
@@ -142,14 +179,19 @@ function CameraFeed({
           !hasFrame ? "opacity-0" : "opacity-100"
         )}
       />
-      {/* Subtle scan line effect */}
-      <div className="scan-line absolute inset-0 pointer-events-none z-30 opacity-40" />
+      {stalled && (
+        <div role="status" aria-live="polite" className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-2 bg-slate-950/85 px-6 text-center">
+          <WifiOff className="h-6 w-6 text-amber-400" />
+          <span className="text-sm font-semibold text-amber-200">Live feed interrupted</span>
+          <span className="text-xs text-slate-300">{hasFrame ? 'The image behind this notice is an older frame.' : 'No recent frames received.'} Waiting for video to resume.</span>
+        </div>
+      )}
 
       {/* Live FPS Badge */}
-      {fps > 0 && (
+      {fps > 0 && !stalled && (
         <div className="absolute bottom-3 right-3 z-40 bg-slate-950/80 backdrop-blur-md border border-slate-800 px-2 py-0.5 rounded text-[10px] font-mono font-semibold text-emerald-400 flex items-center gap-1 shadow-lg">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-          {fps} FPS
+          {fps} display updates/s
         </div>
       )}
     </>
@@ -320,6 +362,7 @@ export default function LiveMonitoring() {
 
   return (
     <motion.div variants={containerVariants} initial="hidden" animate="visible" className="h-full flex flex-col gap-5">
+      <EngineHealthBanner />
       {/* Top Header Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 flex-shrink-0 bg-slate-900/40 backdrop-blur-md border border-slate-800/80 p-4 rounded-2xl shadow-xl">
         <motion.div variants={itemVariants}>
@@ -327,9 +370,6 @@ export default function LiveMonitoring() {
             <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight">
               Live <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-cyan-400 to-indigo-400">Monitoring</span>
             </h1>
-            <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" /> SYSTEM ACTIVE
-            </span>
           </div>
           <p className="text-slate-400 font-medium text-xs sm:text-sm mt-1">
             {camsLoading ? 'Loading cameras...' : `${cameras.filter((c) => c.status === 'ONLINE').length} of ${cameras.length} cameras online`}

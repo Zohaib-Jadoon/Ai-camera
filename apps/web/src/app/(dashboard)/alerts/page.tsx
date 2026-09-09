@@ -5,6 +5,7 @@ import { Bell, ShieldAlert, Eye, Clock, Camera, CheckCircle, XCircle, Loader2 } 
 import { cn } from '@/lib/utils';
 import { useAlerts, useUpdateAlertStatus, AlertItem } from '@/hooks/use-api';
 import AlertDetailModal from '@/components/AlertDetailModal';
+import AlertReview from '@/components/AlertReview';
 
 const sevColors: Record<string, string> = {
   CRITICAL: 'text-red-400 bg-red-500/10 border-red-500/20',
@@ -29,7 +30,6 @@ export default function AlertsPage() {
   const activeCount = alerts.filter((a) => a.status === 'PENDING').length;
 
   const handleResolve = (id: string) => updateStatus.mutate({ id, status: 'RESOLVED' });
-  const handleDismiss = (id: string) => updateStatus.mutate({ id, status: 'DISMISSED' });
 
   return (
     <div className="space-y-6">
@@ -46,7 +46,7 @@ export default function AlertsPage() {
       </div>
 
       <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-0.5 w-fit">
-        {['all', 'PENDING', 'RESOLVED', 'DISMISSED'].map((s) => (
+        {['all', 'PENDING', 'ACKNOWLEDGED', 'RESOLVED'].map((s) => (
           <button
             key={s}
             onClick={() => setStatusFilter(s)}
@@ -102,19 +102,14 @@ export default function AlertsPage() {
                   <span className={cn('text-[10px] font-semibold capitalize', statusColors[alert.status])}>
                     {alert.status.toLowerCase()}
                   </span>
-                  {alert.status === 'PENDING' && (
+                  {alert.status !== 'RESOLVED' && alert.review_status && alert.review_status !== 'PENDING' && (
                     <>
                       <button
                         onClick={() => handleResolve(alert.id)}
+                        aria-label="Resolve reviewed alert"
                         className="p-1.5 rounded-md bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30"
                       >
                         <CheckCircle className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => handleDismiss(alert.id)}
-                        className="p-1.5 rounded-md bg-slate-700/40 text-slate-400 hover:bg-slate-700/60"
-                      >
-                        <XCircle className="w-3.5 h-3.5" />
                       </button>
                     </>
                   )}
@@ -126,6 +121,7 @@ export default function AlertsPage() {
                   </button>
                 </div>
               </div>
+              <AlertReview id={alert.id} status={alert.review_status} />
             </div>
           ))}
           {filtered.length === 0 && (

@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": ".venv\\Scripts\\uvicorn src.main:app --reload --host 0.0.0.0 --port 8000",
-    "start": ".venv\\Scripts\\uvicorn src.main:app --host 0.0.0.0 --port 8000",
+    "dev": ".venv\\Scripts\\python -X utf8 -m src.launcher --reload",
+    "start": ".venv\\Scripts\\python -X utf8 -m src.launcher",
     "lint": "echo \"No JS linting for Python project\""
   }
 }

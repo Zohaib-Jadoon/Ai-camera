@@ -1,4 +1,5 @@
 'use client';
+import { runUiAction } from '@/lib/ui-action';
 
 import { useState } from 'react';
 import { Plus, Search, Wifi, WifiOff, MapPin, Edit, Trash2, TestTube, Camera, Loader2, X, Upload, CheckCircle, AlertCircle } from 'lucide-react';
@@ -66,7 +67,7 @@ export default function CamerasPage() {
     await updateCamera.mutateAsync({
       id,
       name: editForm.name,
-      rtsp_url: editForm.rtsp_url,
+      ...(editForm.rtsp_url.trim() ? { rtsp_url: editForm.rtsp_url.trim() } : {}),
       location: editForm.location,
       sop_name: editForm.sop_name || 'general_detection',
     });
@@ -76,7 +77,7 @@ export default function CamerasPage() {
   const startEdit = (cam: CameraType) => {
     setEditForm({
       name: cam.name,
-      rtsp_url: cam.rtsp_url,
+      rtsp_url: '',
       location: cam.location || '',
       sop_name: cam.sop_name || 'general_detection',
     });
@@ -191,7 +192,7 @@ export default function CamerasPage() {
               Cancel
             </button>
             <button
-              onClick={handleCreate}
+              onClick={() => runUiAction(handleCreate)}
               disabled={createCamera.isPending}
               className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-900 text-white text-sm px-4 py-2 rounded-lg"
             >
@@ -242,7 +243,7 @@ export default function CamerasPage() {
               editForm={editForm}
               setEditForm={setEditForm}
               onStartEdit={() => startEdit(cam)}
-              onSaveEdit={() => handleUpdate(cam.id)}
+              onSaveEdit={() => runUiAction(() => handleUpdate(cam.id))}
               onCancelEdit={() => setEditingId(null)}
               onDelete={() => deleteCamera.mutate(cam.id)}
               isDeleting={deleteCamera.isPending}
@@ -386,6 +387,8 @@ function CameraCard({
               <label className="block text-[10px] font-medium text-slate-400 mb-1">RTSP URL</label>
               <input
                 value={editForm.rtsp_url}
+                placeholder="Leave blank to keep the stored stream"
+                autoComplete="off"
                 onChange={(e) => setEditForm({ ...editForm, rtsp_url: e.target.value })}
                 className="w-full bg-slate-900/60 border border-slate-700/60 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500/50"
               />

@@ -21,6 +21,7 @@ import logging
 import random
 import string
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
@@ -61,9 +62,7 @@ def _make_track_id() -> str:
     e.g. '1715521042-ab3x'
     Matches Frigate's track ID convention.
     """
-    ts = int(time.time())
-    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
-    return f"{ts}-{suffix}"
+    return uuid.uuid4().hex
 
 
 def _centroid(box: list[float]) -> tuple[float, float]:
@@ -115,6 +114,7 @@ class Track:
     age: int = 0                        # frames since track was first created
     disappeared: int = 0               # frames since last successful match
     motionless_count: int = 0          # frames where centroid didn't move
+    attributes: dict = field(default_factory=dict)
     _box_history: deque = field(
         default_factory=lambda: deque(maxlen=_POSITION_HISTORY_LEN),
         repr=False,
@@ -125,6 +125,7 @@ class Track:
         prev_box = self.box
         self.box = det["box"]
         self.confidence = det["confidence"]
+        self.attributes = {k: det[k] for k in ('keypoints', 'mask') if k in det}
         self.disappeared = 0
         self.age += 1
         self._box_history.append(self.box)
@@ -297,6 +298,7 @@ class CentroidTracker:
                     confidence=det["confidence"],
                     box=det["box"],
                     smooth_box=det["box"],
+                    attributes={k: det[k] for k in ('keypoints', 'mask') if k in det},
                 )
                 new_track._box_history.append(det["box"])
                 matched_track_ids.add(tid)
@@ -307,6 +309,7 @@ class CentroidTracker:
         for tid, track in self._tracks.items():
             if tid in matched_track_ids:
                 output.append({
+                    **track.attributes,
                     "object_type":      track.object_type,
                     "confidence":       track.confidence,
                     "track_id":         track.track_id,

@@ -1,0 +1,42 @@
+name: Application quality
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  application:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm exec --workspace=backend -- prisma generate
+      - run: npm test --workspace=backend -- --runInBand
+      - run: npm test --workspace=web
+      - run: npm run build --workspace=backend
+      - run: npm run build --workspace=web
+        env:
+          NEXT_TELEMETRY_DISABLED: '1'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Native camera/model libraries are mocked in these safety regressions.
+      - run: python -m pip install numpy==2.2.6
+      - run: python -m unittest discover -s tests -v
+        working-directory: apps/ai-engine
+      - run: python -m compileall -q apps/ai-engine/src

@@ -14,7 +14,7 @@ export class AlertRulesService {
         ...data,
         schedules: schedules ? { create: schedules } : undefined,
       },
-      include: { schedules: true, camera: true },
+      include: { schedules: true, camera: { select: { id: true, name: true, location: true, status: true } } },
     });
   }
 
@@ -24,14 +24,14 @@ export class AlertRulesService {
     if (enabled !== undefined) where.enabled = enabled;
     return this.prisma.alertRule.findMany({
       where,
-      include: { schedules: true, camera: true },
+      include: { schedules: true, camera: { select: { id: true, name: true, location: true, status: true } } },
     });
   }
 
   async findOne(id: string) {
     const rule = await this.prisma.alertRule.findUnique({
       where: { id },
-      include: { schedules: true, camera: true },
+      include: { schedules: true, camera: { select: { id: true, name: true, location: true, status: true } } },
     });
     if (!rule) throw new NotFoundException('Alert rule not found');
     return rule;
@@ -47,7 +47,7 @@ export class AlertRulesService {
           ? { deleteMany: {}, create: schedules }
           : undefined,
       },
-      include: { schedules: true, camera: true },
+      include: { schedules: true, camera: { select: { id: true, name: true, location: true, status: true } } },
     });
   }
 

@@ -1,4 +1,5 @@
 'use client';
+import { runUiAction } from '@/lib/ui-action';
 
 import { useState } from 'react';
 import {
@@ -245,7 +246,7 @@ export default function CalibrationPage() {
                         </label>
                         <select
                           value={camera.sop_name && camera.sop_name !== '' ? camera.sop_name : 'general_detection'}
-                          onChange={(e) => handleSopChange(camera, e.target.value)}
+                          onChange={(e) => { const value = e.target.value; void runUiAction(() => handleSopChange(camera, value)); }}
                           className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-purple-500/50 transition-colors"
                         >
                           {SOP_OPTIONS.map((opt) => (

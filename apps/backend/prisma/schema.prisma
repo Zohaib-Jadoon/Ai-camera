@@ -153,6 +153,10 @@ model Alert {
   camera     Camera?      @relation(fields: [camera_id], references: [id])
   zone_id    String?
   assignee_id String?
+  review_status String @default("PENDING")
+  reviewed_by String?
+  reviewed_at DateTime?
+  review_note String?
   sent_at    DateTime     @default(now())
 
   @@index([status])
@@ -241,6 +245,11 @@ model Recording {
   camera       Camera    @relation(fields: [camera_id], references: [id], onDelete: Cascade)
   filepath     String?             // optional file path reference
   video_data   Bytes?              // Binary video MP4 data stored directly in PostgreSQL database
+  status       String    @default("LEGACY")
+  object_key   String?
+  sha256       String?
+  privacy_hash String?
+  failure_code String?
   trigger      String              // 'person' | 'car' | 'intrusion' | 'face' …
   duration_sec Int?                // actual clip length in seconds
   size_bytes   Int?

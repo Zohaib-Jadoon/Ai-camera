@@ -1,21 +1,21 @@
-import { Injectable, Optional } from '@nestjs/common';
+import { Injectable, Optional, Inject, forwardRef } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { Zone } from '@prisma/client';
-import { IBroadcastGateway } from '../events/events.gateway';
+import { IBroadcastGateway, EventsGateway } from '../events/events.gateway';
 
 @Injectable()
 export class ZoneService {
   constructor(
     private prisma: PrismaService,
-    @Optional() private gateway?: IBroadcastGateway,
+    @Optional() @Inject(forwardRef(() => EventsGateway)) private gateway?: IBroadcastGateway,
   ) {}
 
   async findAll(): Promise<Zone[]> {
-    return this.prisma.zone.findMany({ include: { camera: true } });
+    return this.prisma.zone.findMany({ include: { camera: { select: { id: true, name: true, location: true, status: true } } } });
   }
 
   async findOne(id: string): Promise<Zone | null> {
-    return this.prisma.zone.findUnique({ where: { id }, include: { camera: true } });
+    return this.prisma.zone.findUnique({ where: { id }, include: { camera: { select: { id: true, name: true, location: true, status: true } } } });
   }
 
   async create(data: { camera_id: string; polygon_points: any; rule_type: string; name?: string }): Promise<Zone> {

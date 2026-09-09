@@ -10,6 +10,7 @@ Post-processing pipeline (all ported from Frigate):
 Returns a clean detection list compatible with the CentroidTracker and intrusion engine.
 """
 import logging
+import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
@@ -218,7 +219,7 @@ try:
     YOLO_AVAILABLE = True
 except ImportError:
     YOLO_AVAILABLE = False
-    logger.warning("Ultralytics not available — detector running in mock mode")
+    logger.warning("Ultralytics not available — object detection unavailable")
 
 
 # COCO & Open-Vocabulary classes of interest for surveillance & weapon detection
@@ -240,11 +241,8 @@ WORLD_PROMPT_CLASSES = [
 
 def _setup_world_classes_if_needed(model, model_name: str):
     if model is not None and 'world' in model_name.lower():
-        try:
-            model.set_classes(WORLD_PROMPT_CLASSES)
-            logger.info(f"YOLO-World open-vocabulary weapon classes set: {WORLD_PROMPT_CLASSES}")
-        except Exception as e:
-            logger.warning(f"Could not set YOLO-World classes: {e}")
+        model.set_classes(WORLD_PROMPT_CLASSES)
+        logger.info('YOLO-World classes configured')
 
 
 class Detector:
@@ -256,34 +254,54 @@ class Detector:
         tracker_type: str = 'bytetrack.yaml', # or botsort.yaml
     ):
         self._loaded = False
+        self._lock = threading.RLock()
+        self.last_error = "MODEL_UNAVAILABLE"
         self.confidence = confidence
         self.enable_tracking = enable_tracking
         self.tracker_type = tracker_type
         self.model: Optional["YOLO"] = None
+        self.device = os.getenv('YOLO_DEVICE', 'auto')
 
         if YOLO_AVAILABLE:
             try:
                 logger.info(f"Loading YOLOv8 model: {model_name}")
                 self.model = YOLO(model_name)
                 _setup_world_classes_if_needed(self.model, model_name)
+                self._configure_device(self.model)
                 self._loaded = True
+                self.last_error = None
                 logger.info(f"YOLOv8 model loaded (conf threshold: {confidence})")
             except Exception as e:
-                logger.error(f"YOLOv8 load failed: {e} — running in mock mode")
+                self.model = None
+                logger.error(f"YOLOv8 load failed: {e} — object detection unavailable")
         else:
-            logger.warning("YOLO not available — detector in mock mode")
+            logger.warning("YOLO not available — object detection unavailable")
 
     def is_loaded(self) -> bool:
         return self._loaded
+
+    def _configure_device(self, model):
+        """Select CUDA when supported; log CPU fallback instead of hiding it."""
+        import torch
+        requested = os.getenv('YOLO_DEVICE', 'auto')
+        self.device = ('cuda:0' if torch.cuda.is_available() else 'cpu') if requested == 'auto' else requested
+        model.to(self.device)
+        logger.info('YOLO inference device=%s torch=%s', self.device, torch.__version__)
+        if self.device == 'cpu':
+            logger.warning('YOLO is running on CPU; CUDA-enabled PyTorch is required for NVIDIA acceleration')
 
     def load_model(self, model_name: str) -> None:
         """Hot-swap the active YOLO model. Raises on failure."""
         if not YOLO_AVAILABLE:
             raise RuntimeError("ultralytics not installed — cannot load model")
         logger.info(f"Hot-swapping YOLO model: {model_name}")
-        self.model = YOLO(model_name)
-        _setup_world_classes_if_needed(self.model, model_name)
-        self._loaded = True
+        replacement = YOLO(model_name)
+        _setup_world_classes_if_needed(replacement, model_name)
+        self._configure_device(replacement)
+        with self._lock:
+            self.model = replacement
+            self._loaded = True
+            self.last_error = None
         logger.info(f"YOLO model hot-swapped to: {model_name}")
 
     def detect(self, frame) -> list[dict]:
@@ -291,10 +309,10 @@ class Detector:
         if frame is None:
             return []
 
-        if self.model is not None:
-            return self._yolo_detect(frame)
-        else:
-            return self._mock_detect()
+        with self._lock:
+            if self._loaded and self.model is not None:
+                return self._yolo_detect(frame)
+            return []
 
     def _yolo_detect(self, frame) -> list[dict]:
         assert self.model is not None  # only called after is-not-None check in detect()
@@ -303,9 +321,9 @@ class Detector:
             # before they reach our per-class apply_object_filters gate.
             weapon_conf = 0.25
             if self.enable_tracking:
-                results = self.model.track(frame, persist=True, tracker=self.tracker_type, verbose=False, conf=weapon_conf)
+                results = self.model.track(frame, persist=True, tracker=self.tracker_type, verbose=False, conf=weapon_conf, device=self.device)
             else:
-                results = self.model(frame, verbose=False, conf=weapon_conf)
+                results = self.model(frame, verbose=False, conf=weapon_conf, device=self.device)
                 
             detections = []
             # THREAT classes need lower YOLO conf so the model doesn't suppress them
@@ -362,26 +380,14 @@ class Detector:
                     detections.append(det)
 
             # ── Frigate-style NMS suppression ─────────────────────────────
-            nms_filtered = suppress_overlapping_detections(detections)
+            # YOLO has already applied NMS. A second aggressive pass discarded
+            # distinct overlapping people in crowds and lower-confidence classes.
+            nms_filtered = detections
             # ── Frigate-style per-label area/score/ratio filters ──────────
-            return apply_object_filters(nms_filtered)
+            filtered = apply_object_filters(nms_filtered)
+            self.last_error = None
+            return filtered
         except Exception as e:
+            self.last_error = "INFERENCE_FAILED"
             logger.error(f"YOLO inference error: {e}")
             return []
-
-    def _mock_detect(self) -> list[dict]:
-        """Synthetic detections for testing without a GPU/camera."""
-        import random
-        if random.random() > 0.3:
-            classes = ['person', 'car', 'motorcycle']
-            return [{
-                'object_type': random.choice(classes),
-                'confidence': round(random.uniform(0.6, 0.95), 3),
-                'box': [
-                    random.uniform(0, 400),
-                    random.uniform(0, 300),
-                    random.uniform(400, 640),
-                    random.uniform(300, 480),
-                ],
-            }]
-        return []

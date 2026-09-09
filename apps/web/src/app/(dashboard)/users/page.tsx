@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import axios from 'axios';
+import { api } from '@/lib/api';
 import {
   Users,
   UserPlus,
@@ -45,15 +45,6 @@ const ROLE_ICONS: Record<UserRole, typeof Shield> = {
   VIEWER: Eye,
 };
 
-function apiBase() {
-  return process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001/api';
-}
-
-function useAuthHeaders() {
-  const token = useAuthStore((s) => s.token);
-  return { Authorization: `Bearer ${token}` };
-}
-
 // ─── Invite Modal ────────────────────────────────────────────────────────────
 
 function InviteModal({ onClose }: { onClose: () => void }) {
@@ -61,12 +52,11 @@ function InviteModal({ onClose }: { onClose: () => void }) {
   const [email, setEmail] = useState('');
   const [role, setRole] = useState<UserRole>('VIEWER');
   const [error, setError] = useState('');
-  const headers = useAuthHeaders();
   const qc = useQueryClient();
 
   const mutation = useMutation({
     mutationFn: (data: { name: string; email: string; role: UserRole }) =>
-      axios.post(`${apiBase()}/users`, data, { headers }),
+      api.post('/users', data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['admin-users'] });
       onClose();
@@ -82,7 +72,7 @@ function InviteModal({ onClose }: { onClose: () => void }) {
         <div className="flex items-center justify-between mb-6">
           <div>
             <h2 className="text-lg font-bold text-white">Invite User</h2>
-            <p className="text-xs text-slate-500 mt-0.5">They will receive a password-reset email to set their password.</p>
+            <p className="text-xs text-slate-500 mt-0.5">After creation, the user must use Forgot Password. Email delivery requires configured SMTP.</p>
           </div>
           <button onClick={onClose} className="text-slate-500 hover:text-white transition-colors">
             <X className="w-5 h-5" />
@@ -172,20 +162,19 @@ function InviteModal({ onClose }: { onClose: () => void }) {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function UserManagementPage() {
-  const headers = useAuthHeaders();
   const qc = useQueryClient();
   const [search, setSearch] = useState('');
   const [showInvite, setShowInvite] = useState(false);
   const currentUser = useAuthStore((s) => s.user);
 
-  const { data: users = [], isLoading } = useQuery<UserRow[]>({
+  const { data: users = [], isLoading, isError, refetch } = useQuery<UserRow[]>({
     queryKey: ['admin-users'],
-    queryFn: () => axios.get(`${apiBase()}/users`, { headers }).then((r) => r.data),
+    queryFn: () => api.get('/users').then((r) => r.data),
   });
 
   const updateMutation = useMutation({
     mutationFn: ({ id, data }: { id: string; data: Partial<UserRow> }) =>
-      axios.patch(`${apiBase()}/users/${id}`, data, { headers }),
+      api.patch(`/users/${id}`, data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin-users'] }),
   });
 
@@ -196,7 +185,7 @@ export default function UserManagementPage() {
     updateMutation.mutate({ id: user.id, data: { role } });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => axios.delete(`${apiBase()}/users/${id}`, { headers }),
+    mutationFn: (id: string) => api.delete(`/users/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin-users'] }),
   });
 
@@ -230,6 +219,10 @@ export default function UserManagementPage() {
         </button>
       </div>
 
+      {(updateMutation.isError || deleteMutation.isError) && (
+        <p role="alert" className="text-sm text-red-400">The user could not be updated. Check your permissions and connection, then try again.</p>
+      )}
+
       {/* Stats */}
       <div className="grid grid-cols-4 gap-4">
         {[
@@ -258,7 +251,12 @@ export default function UserManagementPage() {
 
       {/* Table */}
       <div className="bg-slate-900/40 border border-slate-800/60 rounded-xl overflow-hidden">
-        {isLoading ? (
+        {isError ? (
+          <div role="alert" className="p-6 text-sm text-red-400">
+            Unable to load users. Check your permissions and connection.
+            <button onClick={() => void refetch()} className="ml-3 underline">Retry</button>
+          </div>
+        ) : isLoading ? (
           <div className="flex items-center justify-center h-40 text-slate-500 text-sm">
             <div className="w-5 h-5 border-2 border-slate-700 border-t-blue-500 rounded-full animate-spin mr-3" />
             Loading users…

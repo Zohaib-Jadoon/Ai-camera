@@ -1,7 +1,8 @@
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PassportStrategy } from '@nestjs/passport';
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { PrismaService } from '../prisma/prisma.service';
 
 /**
  * JWT Strategy — validates access tokens from the Authorization header.
@@ -18,20 +19,27 @@ import { ConfigService } from '@nestjs/config';
  */
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
-  constructor(config: ConfigService) {
+  constructor(config: ConfigService, private readonly prisma: PrismaService) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
-      secretOrKey: config.get<string>('JWT_SECRET', 'madad-vision-jwt-secret-2024'),
+      secretOrKey: config.getOrThrow<string>('JWT_SECRET'),
     });
   }
 
   async validate(payload: any) {
-    // Return a consistent user context — req.user.sub is always defined
+    if (typeof payload.sub !== 'string' || !payload.sub) {
+      throw new UnauthorizedException('Invalid session');
+    }
+    const user = await this.prisma.user.findUnique({
+      where: { id: payload.sub },
+      select: { id: true, email: true, role: true, isActive: true },
+    });
+    if (!user?.isActive) throw new UnauthorizedException('Invalid session');
     return {
-      sub: payload.sub,
-      email: payload.email,
-      role: payload.role,
+      sub: user.id,
+      email: user.email,
+      role: user.role,
     };
   }
 }

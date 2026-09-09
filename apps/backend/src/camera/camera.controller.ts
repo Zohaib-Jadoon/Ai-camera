@@ -27,50 +27,38 @@ export class CameraController {
   @Get()
   async findAll(@Req() req: any): Promise<Camera[]> {
     const cameras = await this.cameraService.findAll();
-    const user = req.user;
-    if (user && user.role === Role.VIEWER) {
-      return cameras.map((cam) => this.redactCameraFields(cam));
-    }
-    return cameras;
+    return cameras.map((cam) => this.redactCameraFields(cam));
   }
 
   @Get('health')
   async getHealth(@Req() req: any): Promise<Camera[]> {
     const cameras = await this.cameraService.findUnhealthy();
-    const user = req.user;
-    if (user && user.role === Role.VIEWER) {
-      return cameras.map((cam) => this.redactCameraFields(cam));
-    }
-    return cameras;
+    return cameras.map((cam) => this.redactCameraFields(cam));
   }
 
   @Get(':id')
   async findOne(@Param('id') id: string, @Req() req: any): Promise<Camera | null> {
     const camera = await this.cameraService.findOne(id);
     if (!camera) return null;
-    const user = req.user;
-    if (user && user.role === Role.VIEWER) {
-      return this.redactCameraFields(camera);
-    }
-    return camera;
+    return this.redactCameraFields(camera);
   }
 
   @Post()
   @Roles(Role.ADMIN, Role.SECURITY_OPERATOR)
-  create(@Body() data: CreateCameraDto): Promise<Camera> {
-    return this.cameraService.create(data);
+  async create(@Body() data: CreateCameraDto): Promise<Camera> {
+    return this.redactCameraFields(await this.cameraService.create(data));
   }
 
   @Patch(':id')
   @Roles(Role.ADMIN, Role.SECURITY_OPERATOR)
-  update(@Param('id') id: string, @Body() data: UpdateCameraDto): Promise<Camera> {
-    return this.cameraService.update(id, data);
+  async update(@Param('id') id: string, @Body() data: UpdateCameraDto): Promise<Camera> {
+    return this.redactCameraFields(await this.cameraService.update(id, data));
   }
 
   @Delete(':id')
   @Roles(Role.ADMIN)
-  remove(@Param('id') id: string): Promise<Camera> {
-    return this.cameraService.remove(id);
+  async remove(@Param('id') id: string): Promise<Camera> {
+    return this.redactCameraFields(await this.cameraService.remove(id));
   }
 
   /**

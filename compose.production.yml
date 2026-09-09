@@ -1,0 +1,89 @@
+# Standalone production topology. Supply secret files and a provisioned S3 bucket.
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: madad_vision
+      POSTGRES_USER: madad
+      POSTGRES_PASSWORD_FILE: /run/secrets/database_password
+    secrets: [database_password]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U madad -d madad_vision"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  backend:
+    build: { context: ., target: backend }
+    restart: unless-stopped
+    init: true
+    environment:
+      APP_SECRETS_FILE: /run/secrets/application
+      NODE_ENV: production
+      CORS_ORIGIN: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN to your HTTPS origin}
+      TEMP_RECORDINGS_DIR: /app/spool
+      STORAGE_PATH: /app/snapshots
+      ALLOW_SELF_REGISTRATION: 'false'
+      ALLOW_LEGACY_CAMERA_CREDENTIALS: ${ALLOW_LEGACY_CAMERA_CREDENTIALS:-true}
+    secrets: [application]
+    volumes: ["spool:/app/spool", "snapshots:/app/snapshots"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3001/api/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    stop_grace_period: 30s
+  web:
+    build:
+      context: .
+      target: web
+      args: { PUBLIC_ORIGIN: '${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN}' }
+    restart: unless-stopped
+    init: true
+    depends_on:
+      backend: { condition: service_healthy }
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+  ai-engine:
+    build: { context: ., dockerfile: apps/ai-engine/Dockerfile }
+    restart: unless-stopped
+    init: true
+    environment:
+      BACKEND_WS_URL: http://backend:3001
+      AI_ENGINE_KEY_FILE: /run/secrets/engine_key
+      YOLO_MODEL: /models/yolov8n.pt
+      ENGINE_HEALTH_FILE: /tmp/engine-heartbeat
+    secrets: [engine_key]
+    volumes: ["${MODELS_PATH:?Set MODELS_PATH}:/models:ro"]
+    healthcheck:
+      test: [CMD, python, -c, "import pathlib,time; p=pathlib.Path('/tmp/engine-heartbeat'); exit(0 if p.exists() and time.time()-p.stat().st_mtime<65 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    depends_on:
+      backend: { condition: service_healthy }
+  nginx:
+    image: nginx:1.28-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    secrets: [tls_cert, tls_key]
+    volumes: ["./docker/nginx/production.conf:/etc/nginx/conf.d/default.conf:ro"]
+    depends_on:
+      web: { condition: service_healthy }
+secrets:
+  application: { file: '${APP_SECRETS_PATH:?Set APP_SECRETS_PATH}' }
+  database_password: { file: '${DATABASE_PASSWORD_PATH:?Set DATABASE_PASSWORD_PATH}' }
+  engine_key: { file: '${ENGINE_KEY_PATH:?Set ENGINE_KEY_PATH}' }
+  tls_cert: { file: '${TLS_CERT_PATH:?Set TLS_CERT_PATH}' }
+  tls_key: { file: '${TLS_KEY_PATH:?Set TLS_KEY_PATH}' }
+volumes:
+  pgdata:
+  spool:
+  snapshots:

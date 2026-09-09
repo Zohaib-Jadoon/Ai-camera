@@ -51,7 +51,7 @@ export class FacesController {
         await this.facesService.addEmbedding(person.id, embedding);
         await this.facesService.updatePerson(person.id, { photo_url: image_b64 });
         const allEmbeddings = await this.facesService.getAllEmbeddings();
-        this.eventsGateway.server.emit('sync_embeddings', allEmbeddings);
+        this.eventsGateway.emitToAiEngines('sync_embeddings', allEmbeddings);
         return this.facesService.findOne(person.id);
       } catch (err) {
         // Person was created but face extraction failed — return person so client can retry upload
@@ -79,6 +79,7 @@ export class FacesController {
   }
 
   @Get('embeddings')
+  @Roles(Role.ADMIN)
   @ApiOperation({ summary: 'Get all face embeddings (for AI engine loading)' })
   getAllEmbeddings() {
     return this.facesService.getAllEmbeddings();
@@ -111,7 +112,7 @@ export class FacesController {
       await this.facesService.updatePerson(personId, { photo_url: imageB64 });
       const allEmbeddings = await this.facesService.getAllEmbeddings();
       if (this.eventsGateway.server) {
-        this.eventsGateway.server.emit('sync_embeddings', allEmbeddings);
+        this.eventsGateway.emitToAiEngines('sync_embeddings', allEmbeddings);
       }
       return saved;
     } catch (err: any) {

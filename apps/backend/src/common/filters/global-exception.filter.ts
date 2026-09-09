@@ -24,8 +24,8 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         status = HttpStatus.BAD_REQUEST;
         message = 'Foreign key constraint failed or record not found';
       } else {
-        status = HttpStatus.BAD_REQUEST;
-        message = prismaError.message || 'Database query error';
+        status = HttpStatus.INTERNAL_SERVER_ERROR;
+        message = 'Database operation failed';
       }
     } else if (exception instanceof HttpException) {
       status = exception.getStatus();
@@ -35,20 +35,16 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     const errorResponse = {
       statusCode: status,
       timestamp: new Date().toISOString(),
-      path: request.url,
+      path: request.path,
       message: typeof message === 'object' ? (message as any).message || message : message,
     };
 
     if (status >= 500) {
       this.logger.error(
-        `${request.method} ${request.url} → ${status}`,
-        exception instanceof Error ? exception.stack : String(exception),
+        `${request.method} ${request.route?.path ?? request.path} → ${status}`,
       );
     } else {
-      this.logger.warn(`${request.method} ${request.url} → ${status}: ${JSON.stringify(message)}`);
-      if (status === 400) {
-        this.logger.warn(`400 Error Body: ${JSON.stringify(request.body)}`);
-      }
+      this.logger.warn(`${request.method} ${request.route?.path ?? request.path} → ${status}`);
     }
 
     response.status(status).json(errorResponse);

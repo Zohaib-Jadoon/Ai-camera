@@ -14,13 +14,13 @@ export class RecordingScheduler {
 
   @Cron(CronExpression.EVERY_DAY_AT_3AM)
   async purgeOldRecordings() {
-    const retentionDays = this.configService.get<number>('RECORDING_RETENTION_DAYS', 30);
+    const retentionDays = Number(this.configService.get('RECORDING_RETENTION_DAYS', 30));
     this.logger.log(`Starting daily recording purge (retention: ${retentionDays} days)`);
     try {
       await this.recordingService.purgeOldClips(retentionDays);
       this.logger.log('Recording purge completed');
     } catch (err) {
-      this.logger.error(`Recording purge failed: ${err.message}`);
+      this.logger.error('Recording purge failed');
     }
   }
 }

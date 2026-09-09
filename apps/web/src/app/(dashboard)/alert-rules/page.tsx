@@ -1,4 +1,5 @@
 'use client';
+import { runUiAction } from '@/lib/ui-action';
 
 import { useState } from 'react';
 import { Plus, Edit, Trash2, Loader2 } from 'lucide-react';
@@ -177,7 +178,7 @@ export default function AlertRulesPage() {
                   <input
                     type="checkbox"
                     checked={rule.enabled}
-                    onChange={() => toggleEnabled(rule)}
+                    onChange={() => runUiAction(() => toggleEnabled(rule))}
                     className="sr-only peer"
                   />
                   <div className="w-9 h-5 bg-slate-700 peer-focus:outline-none rounded-full peer-checked:bg-blue-600 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
@@ -372,7 +373,7 @@ export default function AlertRulesPage() {
               Cancel
             </button>
             <button
-              onClick={handleSave}
+              onClick={() => runUiAction(handleSave)}
               disabled={createRule.isPending || updateRule.isPending}
               className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-medium px-4 py-2 rounded-lg transition-colors"
             >

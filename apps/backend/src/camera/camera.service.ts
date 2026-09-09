@@ -6,29 +6,30 @@ import { UpdateCameraDto } from './dto/update-camera.dto';
 import { BulkImportCamerasDto } from './dto/bulk-import-cameras.dto';
 import { EventsGateway } from '../events/events.gateway';
 import { ConfigService } from '@nestjs/config';
-import { encrypt, decrypt } from '../common/utils/crypto.utils';
+import { CameraCredentials, validateCameraUrl } from '../common/utils/camera-credentials';
+import { randomUUID } from 'crypto';
 
 // Forward reference avoids circular module dependency
 // EventsGateway -> CameraService -> EventsGateway
 // Injected as optional so CameraService still works in isolation (tests).
 @Injectable()
 export class CameraService {
-  private readonly secret: string;
+  private readonly credentials: CameraCredentials;
 
   constructor(
     private prisma: PrismaService,
     private configService: ConfigService,
     @Optional() @Inject(forwardRef(() => EventsGateway)) private gateway?: EventsGateway,
   ) {
-    this.secret = this.configService.get<string>('JWT_SECRET', 'madad-vision-jwt-secret-2024');
+    this.credentials = new CameraCredentials(this.configService);
   }
 
   private decryptCamera(camera: Camera): Camera {
     return {
       ...camera,
-      rtsp_url: decrypt(camera.rtsp_url, this.secret),
-      detect_url: camera.detect_url ? decrypt(camera.detect_url, this.secret) : camera.detect_url,
-      record_url: camera.record_url ? decrypt(camera.record_url, this.secret) : camera.record_url,
+      rtsp_url: this.credentials.decrypt(camera.rtsp_url),
+      detect_url: camera.detect_url ? this.credentials.decrypt(camera.detect_url) : camera.detect_url,
+      record_url: camera.record_url ? this.credentials.decrypt(camera.record_url) : camera.record_url,
     };
   }
 
@@ -52,10 +53,10 @@ export class CameraService {
     const camera = await this.prisma.camera.create({
       data: {
         name: dto.name,
-        rtsp_url: encrypt(dto.rtsp_url, this.secret),
+        rtsp_url: this.credentials.encrypt(dto.rtsp_url),
         location: dto.location,
-        detect_url: dto.detect_url ? encrypt(dto.detect_url, this.secret) : undefined,
-        record_url: dto.record_url ? encrypt(dto.record_url, this.secret) : undefined,
+        detect_url: dto.detect_url ? this.credentials.encrypt(dto.detect_url) : undefined,
+        record_url: dto.record_url ? this.credentials.encrypt(dto.record_url) : undefined,
         ...(dto.sop_name !== undefined ? { sop_name: dto.sop_name } : {}),
         ...(dto.status ? { status: dto.status as any } : {}),
       } as any,
@@ -69,9 +70,9 @@ export class CameraService {
       where: { id },
       data: {
         ...(dto.name ? { name: dto.name } : {}),
-        ...(dto.rtsp_url ? { rtsp_url: encrypt(dto.rtsp_url, this.secret) } : {}),
-        ...(dto.detect_url ? { detect_url: encrypt(dto.detect_url, this.secret) } : {}),
-        ...(dto.record_url ? { record_url: encrypt(dto.record_url, this.secret) } : {}),
+        ...(dto.rtsp_url ? { rtsp_url: this.credentials.encrypt(dto.rtsp_url) } : {}),
+        ...(dto.detect_url ? { detect_url: this.credentials.encrypt(dto.detect_url) } : {}),
+        ...(dto.record_url ? { record_url: this.credentials.encrypt(dto.record_url) } : {}),
         ...(dto.location !== undefined ? { location: dto.location } : {}),
         ...(dto.status ? { status: dto.status as any } : {}),
         ...(dto.sop_name !== undefined ? { sop_name: dto.sop_name } : {}),
@@ -117,16 +118,16 @@ export class CameraService {
         await this.prisma.camera.create({
           data: {
             name: item.name,
-            rtsp_url: encrypt(item.rtsp_url, this.secret),
+            rtsp_url: this.credentials.encrypt(item.rtsp_url),
             location: item.location,
-            detect_url: item.detect_url ? encrypt(item.detect_url, this.secret) : undefined,
-            record_url: item.record_url ? encrypt(item.record_url, this.secret) : undefined,
+            detect_url: item.detect_url ? this.credentials.encrypt(item.detect_url) : undefined,
+            record_url: item.record_url ? this.credentials.encrypt(item.record_url) : undefined,
             group_id: item.group_id,
           },
         });
         created++;
       } catch (err: any) {
-        errors.push(`${item.name}: ${err.message || 'Unknown error'}`);
+        errors.push(`${item.name}: Camera could not be imported; check the stream URL and camera group.`);
       }
     }
 
@@ -154,7 +155,7 @@ export class CameraService {
     if (!url) {
       const camera = await this.prisma.camera.findUnique({ where: { id } });
       if (!camera) throw new NotFoundException(`Camera ${id} not found`);
-      url = decrypt(camera.rtsp_url, this.secret);
+      url = this.credentials.decrypt(camera.rtsp_url);
     }
 
     const gateway = this.gateway as any;
@@ -169,7 +170,8 @@ export class CameraService {
       };
     }
 
-    const requestId = `test-${id}-${Date.now()}`;
+    validateCameraUrl(url);
+    const requestId = `test-${randomUUID()}`;
 
     // Wait for the AI engine to emit stream_test_result with this requestId
     const result = await new Promise<{
@@ -193,14 +195,14 @@ export class CameraService {
         clearTimeout(timeout);
         resolve({
           ok: data.ok,
-          message: data.message,
+          message: data.ok ? 'Connection successful.' : 'Stream verification failed. Check the camera configuration and connectivity.',
           resolution: data.resolution ?? null,
           fps: data.fps ?? null,
         });
       });
 
-      // Ask all connected sockets (AI Engine is among them) to test the stream
-      gateway.server.emit('test_stream', { request_id: requestId, rtsp_url: url });
+      // The probe URL can contain credentials; deliver only to authenticated engines.
+      gateway.emitToAiEngines('test_stream', { request_id: requestId, rtsp_url: url });
     });
 
     return result;

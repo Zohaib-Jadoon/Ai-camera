@@ -1,0 +1,5 @@
+# Install after requirements.txt, with the engine stopped.
+# Matching CUDA variants of the locally validated torch/torchvision pair.
+--index-url https://download.pytorch.org/whl/cu126
+torch==2.12.1+cu126
+torchvision==0.27.1+cu126

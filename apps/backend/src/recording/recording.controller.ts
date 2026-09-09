@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, ParseIntPipe, DefaultValuePipe, UseGuards, Res, StreamableFile, NotFoundException } from '@nestjs/common';
+import { Controller, Get, Post, Param, Query, ParseIntPipe, DefaultValuePipe, UseGuards, Res, StreamableFile, NotFoundException } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
@@ -39,41 +39,20 @@ export class RecordingController {
 
   @Get(':id/download')
   @Roles(Role.ADMIN, Role.SECURITY_OPERATOR)
-  @ApiOperation({ summary: 'Download a recording MP4 file directly from database storage' })
+  @ApiOperation({ summary: 'Download a privacy-checked, integrity-verified recording' })
   async download(
     @Param('id') id: string,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const recording = await this.recordingService.findById(id);
-    if (!recording) {
-      throw new NotFoundException('Recording not found');
-    }
-
-    // Direct database binary video stream
-    if (recording.video_data && recording.video_data.length > 0) {
-      res.setHeader('Content-Type', 'video/mp4');
-      res.setHeader('Content-Length', recording.video_data.length);
-      res.setHeader('Content-Disposition', `inline; filename="recording_${id}.mp4"`);
-      return new StreamableFile(Buffer.from(recording.video_data));
-    }
-
-    // Fallback to local path if present
-    if (recording.filepath && fs.existsSync(recording.filepath)) {
-      const stat = fs.statSync(recording.filepath);
-      const filename = path.basename(recording.filepath);
-
-      res.setHeader('Content-Type', 'video/mp4');
-      res.setHeader('Content-Length', stat.size);
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-
-      const stream = fs.createReadStream(recording.filepath);
-      return new StreamableFile(stream);
-    }
-
-    throw new NotFoundException('Video content not found in database or storage');
+    const { buffer, sha256 } = await this.recordingService.download(id);
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Length', buffer.length);
+    res.setHeader('Content-Digest', `sha-256=:${Buffer.from(sha256, 'hex').toString('base64')}:`);
+    res.setHeader('Cache-Control', 'no-store');
+    return new StreamableFile(buffer);
   }
 
-  @Get('purge')
+  @Post('purge')
   @Roles(Role.ADMIN)
   @ApiOperation({ summary: 'Manually trigger retention purge (admin use)' })
   @ApiQuery({ name: 'days', required: false, type: Number })

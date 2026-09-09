@@ -1,4 +1,5 @@
 'use client';
+import { runUiAction } from '@/lib/ui-action';
 
 import { useState } from 'react';
 import { Users, Search, UserPlus, Tag, Loader2, X, UploadCloud, Image as ImageIcon, Bell, BellOff, Edit2, Check } from 'lucide-react';
@@ -239,7 +240,7 @@ export default function FacesPage() {
           <div className="flex justify-end gap-2">
             <button onClick={() => { setShowAdd(false); setPendingPhoto(null); }} className="px-4 py-2 text-sm text-slate-400">Cancel</button>
             <button
-              onClick={handleCreate}
+              onClick={() => runUiAction(handleCreate)}
               disabled={createPerson.isPending || uploadImage.isPending || !form.name.trim()}
               className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-900 text-white text-sm px-4 py-2 rounded-lg"
             >
@@ -291,7 +292,7 @@ export default function FacesPage() {
               setEditForm={setForm}
               onStartEdit={() => startEdit(person)}
               onCancelEdit={cancelEdit}
-              onSaveEdit={() => saveEdit(person.id)}
+              onSaveEdit={() => runUiAction(() => saveEdit(person.id))}
               onDelete={() => deletePerson.mutate(person.id)}
               onUpload={(e) => handleFileUpload(person.id, e)}
               isUploading={uploadImage.isPending && uploadImage.variables?.personId === person.id}

@@ -95,7 +95,7 @@ export default function AnalyticsPage() {
             </div>
           </div>
           <div className="h-56">
-            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={1}>
+            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={1} initialDimension={{ width: 1, height: 1 }}>
               <AreaChart data={trendData || []}>
                 <defs>
                   <linearGradient id="gCount" x1="0" y1="0" x2="0" y2="1">
@@ -119,7 +119,7 @@ export default function AnalyticsPage() {
         <div className="glass-card rounded-xl border border-slate-800/60 p-5">
           <h3 className="text-sm font-semibold text-white mb-4">Detection by Type</h3>
           <div className="h-56">
-            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={1}>
+            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={1} initialDimension={{ width: 1, height: 1 }}>
               <PieChart>
                 <Pie data={byTypeData} cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={3} dataKey="value">
                   {byTypeData.map((entry: any, index: number) => (
@@ -146,7 +146,7 @@ export default function AnalyticsPage() {
       <div className="glass-card rounded-xl border border-slate-800/60 p-5">
         <h3 className="text-sm font-semibold text-white mb-4">Camera Activity</h3>
         <div className="h-56">
-          <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={1}>
+          <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={1} initialDimension={{ width: 1, height: 1 }}>
             <BarChart data={cameraActivity || []} barSize={20}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
               <XAxis dataKey="camera_name" stroke="#334155" fontSize={10} tickLine={false} axisLine={false} />

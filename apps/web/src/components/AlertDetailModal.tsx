@@ -111,7 +111,7 @@ export default function AlertDetailModal({ alert, open, onClose }: AlertDetailMo
               <Button variant="outline" size="sm" onClick={() => handleStatus('ACKNOWLEDGED')} disabled={updateStatus.isPending}>
                 Acknowledge
               </Button>
-              <Button size="sm" onClick={() => handleStatus('RESOLVED')} disabled={updateStatus.isPending} className="bg-emerald-600 hover:bg-emerald-500 text-white">
+                <Button size="sm" onClick={() => handleStatus('RESOLVED')} disabled={updateStatus.isPending || !alert.review_status || alert.review_status === 'PENDING'} className="bg-emerald-600 hover:bg-emerald-500 text-white">
                 {updateStatus.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle className="w-3.5 h-3.5" />}
                 Resolve
               </Button>

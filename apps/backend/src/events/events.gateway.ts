@@ -4,6 +4,7 @@ import {
   SubscribeMessage,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  OnGatewayInit,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { Logger, Inject, forwardRef, OnModuleInit } from '@nestjs/common';
@@ -18,6 +19,8 @@ import { FacesService } from '../faces/faces.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RecordingService } from '../recording/recording.service';
 import { ModuleRef } from '@nestjs/core';
+import { installSocketAuthentication } from './socket-auth';
+import { EngineHealthService } from './engine-health.service';
 
 /** Shared interface used by CameraService and ZoneService to broadcast updates. */
 export interface IBroadcastGateway {
@@ -35,7 +38,7 @@ export interface IBroadcastGateway {
     credentials: true,
   },
 })
-export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, OnModuleInit {
+export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit, OnModuleInit {
   @WebSocketServer()
   server: Server;
 
@@ -43,6 +46,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
 
   /** Tracks socket IDs that belong to the AI Engine (no JWT). */
   private aiEngineSockets = new Set<string>();
+  private sessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   /** Internal EventEmitter used to resolve stream-test result Promises. */
   readonly streamTestBus = new EventEmitter();
@@ -58,6 +62,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
     private prisma: PrismaService,
     private recordingService: RecordingService,
     private moduleRef: ModuleRef,
+    private engineHealth: EngineHealthService = new EngineHealthService(),
   ) {}
 
   onModuleInit() {
@@ -65,44 +70,44 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
     this.facesService = this.moduleRef.get(FacesService, { strict: false });
   }
 
-  async handleConnection(client: Socket) {
-    const token = this.extractToken(client);
+  afterInit(server: Server): void {
+    installSocketAuthentication(server, this.configService, this.jwtService, this.prisma);
+  }
 
-    // Allow AI Engine internal service if key matches
-    if (!token) {
-      const engineKey = client.handshake.headers['x-ai-engine-key'] || client.handshake.auth?.['x-ai-engine-key'];
-      
-      if (engineKey) {
-        const expectedKey = this.configService.get<string>('AI_ENGINE_KEY', 'default-secret-key');
-        if (engineKey === expectedKey) {
-          this.logger.log(`AI Engine connected: ${client.id}`);
-          this.aiEngineSockets.add(client.id);
-          return;
-        }
-        
-        this.logger.warn(`AI Engine connection rejected (invalid AI_ENGINE_KEY): ${client.id}`);
-        client.disconnect(true);
-        return;
-      }
-      
-      this.logger.warn(`Client connection rejected (missing token): ${client.id}`);
+  handleConnection(client: Socket): void {
+    if (client.data.authenticatedEngine === true) {
+      this.aiEngineSockets.add(client.id);
+      this.engineHealth.connect(client.id);
+      this.logger.log(`AI Engine connected: ${client.id}`);
+      return;
+    }
+    const expiresAt = client.data.expiresAt;
+    if (!client.data.user || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) {
       client.disconnect(true);
       return;
     }
-
-    try {
-      const secret = this.configService.get<string>('JWT_SECRET', 'madad-vision-jwt-secret-2024');
-      const payload = this.jwtService.verify(token, { secret });
-      (client as any).user = payload;
-      this.logger.log(`Client connected: ${client.id} (user: ${payload.sub})`);
-    } catch {
-      this.logger.warn(`Client connection rejected (invalid token): ${client.id}`);
-      client.disconnect(true);
-    }
+    // Recheck long lifetimes in bounded intervals to avoid Node timer overflow.
+    const expire = () => {
+      const remaining = expiresAt - Date.now();
+      if (remaining <= 0) {
+        this.sessionTimers.delete(client.id);
+        client.emit('session_expired');
+        client.disconnect(true);
+        return;
+      }
+      const timer = setTimeout(expire, Math.min(remaining, 2_147_483_647));
+      timer.unref();
+      this.sessionTimers.set(client.id, timer);
+    };
+    expire();
+    this.logger.log(`Client connected: ${client.id}`);
   }
 
   handleDisconnect(client: Socket) {
+    clearTimeout(this.sessionTimers.get(client.id));
+    this.sessionTimers.delete(client.id);
     this.aiEngineSockets.delete(client.id);
+    this.engineHealth.disconnect(client.id);
     this.logger.log(`Client disconnected: ${client.id}`);
   }
 
@@ -118,6 +123,13 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
   /** True when at least one AI Engine socket is connected. */
   isAiEngineConnected(): boolean {
     return this.aiEngineSockets.size > 0;
+  }
+
+  /** Socket IDs are private rooms; only authenticated engine IDs receive secrets. */
+  emitToAiEngines(event: string, payload: unknown): void {
+    for (const socketId of this.aiEngineSockets) {
+      this.server.to(socketId).emit(event, payload);
+    }
   }
 
   @SubscribeMessage('detection')
@@ -143,6 +155,12 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
     } catch (err) {
       this.logger.error(`Failed to persist detection: ${err.message}`);
     }
+  }
+
+  @SubscribeMessage('engine_health')
+  handleEngineHealth(client: Socket, payload: unknown): void {
+    if (!this.verifyAiEngine(client)) return;
+    this.engineHealth.report(client.id, payload);
   }
 
   @SubscribeMessage('face_event')
@@ -229,15 +247,8 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
 
   @SubscribeMessage('request_cameras')
   async handleRequestCameras(client: Socket) {
-    // Only serve camera config to the AI Engine (no user) or authenticated users.
-    // Prevents unauthenticated web clients from harvesting RTSP URLs.
-    const clientUser = (client as any).user;
-    const isAiEngine = !clientUser; // AI Engine connects without a JWT by design
-    const isAuthed = !!clientUser;
-    if (!isAiEngine && !isAuthed) {
-      client.emit('error', { message: 'Unauthorized' });
-      return;
-    }
+    // Camera configuration contains credentials and is only for authenticated engines.
+    if (!this.verifyAiEngine(client)) return;
     try {
       const cameras = await this.cameraService.findAll();
       // Include privacy masks in each camera payload so the AI Engine can
@@ -260,6 +271,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
 
   @SubscribeMessage('request_embeddings')
   async handleRequestEmbeddings(client: Socket) {
+    if (!this.verifyAiEngine(client)) return;
     try {
       const embeddings = await this.facesService.getAllEmbeddings();
       client.emit('sync_embeddings', embeddings);
@@ -285,8 +297,8 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
           return { ...cam, privacy_masks: masks };
         }),
       );
-      this.server.emit('sync_cameras', camerasWithMasks);
-      this.logger.log(`Broadcast sync_cameras (${camerasWithMasks.length} cameras) to all clients`);
+      this.emitToAiEngines('sync_cameras', camerasWithMasks);
+      this.logger.log(`Sent sync_cameras (${camerasWithMasks.length} cameras) to authenticated engines`);
     } catch (err) {
       this.logger.error(`broadcastCameraSync failed: ${err.message}`);
     }
@@ -316,7 +328,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
   @SubscribeMessage('stream_test_result')
   handleStreamTestResult(_client: Socket, payload: any): void {
     if (!this.verifyAiEngine(_client)) return;
-    this.logger.log(`Stream test result: ${JSON.stringify(payload)}`);
+    this.logger.debug('Received stream test result from authenticated engine');
     // Emit on internal bus so CameraService.testConnection() resolves the right promise
     this.streamTestBus.emit(payload?.request_id, payload);
   }
@@ -359,7 +371,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
       this.streamTestBus.once(requestId, onResult);
       
       // Emit to AI Engine
-      this.server.emit('extract_face', { request_id: requestId, image_b64: imageB64 });
+      this.emitToAiEngines('extract_face', { request_id: requestId, image_b64: imageB64 });
       
       // Timeout after 15 seconds
       setTimeout(() => {
@@ -437,18 +449,10 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
       await this.recordingService.startClip(camera_id, trigger, duration_sec ?? 30, record_url);
       this.logger.log(`Recording started for camera ${camera_id} trigger=${trigger}`);
     } catch (err) {
-      this.logger.error(`Failed to start recording: ${err.message}`);
+      this.logger.error('Failed to start recording');
     }
   }
 
-
-  private extractToken(client: Socket): string | undefined {
-    const auth = client.handshake.auth?.token || client.handshake.headers?.authorization;
-    if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
-      return auth.substring(7);
-    }
-    return auth as string | undefined;
-  }
 
   // ── Advanced AI Event Handlers ──────────────────────────────────────────
 
@@ -626,7 +630,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
     const requestId = `clip-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
     // Forward to AI Engine
-    this.server.emit('clip_search', { request_id: requestId, query });
+    this.emitToAiEngines('clip_search', { request_id: requestId, query });
 
     // Wait for result via internal bus
     const result = await new Promise<any>((resolve) => {
@@ -653,7 +657,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
     const requestId = `forecast-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
     // Forward to AI Engine
-    this.server.emit('request_forecast', {
+    this.emitToAiEngines('request_forecast', {
       request_id: requestId,
       camera_id: payload?.camera_id,
     });

@@ -1,4 +1,4 @@
-import { Injectable, Logger, Inject } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, Inject } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
@@ -122,18 +122,12 @@ export class AlertsService {
       await this.cache.del('analytics:cameras');
       this.logger.log(`Alert created [${alert.alert_type}] id=${alert.id}`);
 
-      // Dispatch to configured webhooks (Slack, Teams, PagerDuty, etc.)
-      this.webhooksService.dispatch('alert.created', {
-        id: alert.id,
-        alert_type: alert.alert_type,
-        severity: alert.severity,
-        camera_id: alert.camera_id,
-        status: alert.status,
-        sent_at: alert.sent_at,
-      }).catch(() => {});
+      // Unreviewed machine alerts stay in the operator dashboard. External
+      // consequential integrations receive only explicit human confirmations.
 
       return alert;
     } catch (err: any) {
+      await this.cache.del(cooldownKey).catch(() => {});
       if (alertData.zone_id && err?.code === 'P2003') {
         // Foreign-key violation — retry without zone_id
         this.logger.warn(
@@ -174,6 +168,10 @@ export class AlertsService {
   }
 
   async updateStatus(id: string, status: AlertStatusType) {
+    if (status === 'RESOLVED') {
+      const existing = await this.prisma.alert.findUniqueOrThrow({ where: { id } });
+      if (existing.review_status === 'PENDING') throw new BadRequestException('Human review is required before resolution');
+    }
     const validStatuses: AlertStatusType[] = [
       'PENDING',
       'ACKNOWLEDGED',
@@ -202,5 +200,23 @@ export class AlertsService {
     });
     await this.cache.set(ACTIVE_COUNT_KEY, count, 10000);
     return count;
+  }
+
+  async review(id: string, verdict: 'CONFIRMED' | 'DISMISSED', note: string, reviewer: string) {
+    if (!['CONFIRMED', 'DISMISSED'].includes(verdict) || !reviewer || note.trim().length < 3) {
+      throw new BadRequestException('A reviewer, verdict and explanation are required');
+    }
+    const result = await this.prisma.alert.updateMany({ where: { id, review_status: 'PENDING' }, data: {
+      review_status: verdict, reviewed_by: reviewer, reviewed_at: new Date(), review_note: note.trim(),
+    } });
+    if (result.count !== 1) throw new ConflictException('Alert was already reviewed or does not exist');
+    const alert = await this.prisma.alert.findUniqueOrThrow({ where: { id } });
+    if (verdict === 'CONFIRMED') {
+      await this.webhooksService.dispatch('alert.reviewed', {
+        id, alert_type: alert.alert_type, severity: alert.severity,
+        camera_id: alert.camera_id, review_status: verdict, reviewed_by: reviewer,
+      }).catch(() => this.logger.warn('Review saved; external delivery failed'));
+    }
+    return alert;
   }
 }

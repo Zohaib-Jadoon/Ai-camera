@@ -11,8 +11,10 @@ import {
   HttpStatus,
   ParseIntPipe,
   DefaultValuePipe,
+  Req,
 } from '@nestjs/common';
 import { AlertsService } from './alerts.service';
+import { ReviewAlertDto } from './dto/review-alert.dto';
 import {
   CreateAlertDto,
   UpdateAlertStatusDto,
@@ -88,5 +90,11 @@ export class AlertsController {
     @Body() dto: UpdateAlertStatusDto,
   ) {
     return this.alertsService.updateStatus(id, dto.status);
+  }
+
+  @Post(':id/review')
+  @Roles(Role.ADMIN, Role.SECURITY_OPERATOR)
+  review(@Param('id') id: string, @Body() dto: ReviewAlertDto, @Req() req: any) {
+    return this.alertsService.review(id, dto.verdict, dto.note, req.user.sub);
   }
 }

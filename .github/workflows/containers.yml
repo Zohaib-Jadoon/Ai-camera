@@ -1,0 +1,12 @@
+name: Linux container build gate
+on: [workflow_dispatch]
+permissions: { contents: read }
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --target backend -t madad-backend:test .
+      - run: docker build --target web --build-arg PUBLIC_ORIGIN=https://example.invalid -t madad-web:test .
+      - run: docker build -f apps/ai-engine/Dockerfile -t madad-engine:test .

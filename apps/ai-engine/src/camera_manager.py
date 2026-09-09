@@ -42,6 +42,13 @@ class CameraManager:
     def get(self, camera_id: str) -> ActiveCamera | None:
         return self._cameras.get(camera_id)
 
+    async def remove_and_wait(self, camera_id: str) -> None:
+        """Cancel a camera and finish cleanup before starting its replacement."""
+        camera = self._cameras.get(camera_id)
+        self.remove(camera_id)
+        if camera and camera.task:
+            await asyncio.gather(camera.task, return_exceptions=True)
+
     def count(self) -> int:
         return len(self._cameras)
 

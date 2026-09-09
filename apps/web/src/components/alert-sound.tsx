@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { api } from '@/lib/api';
-import { useSettings } from '@/hooks/use-api';
 
 function playAlertTone() {
   try {
@@ -50,15 +49,13 @@ function useMuted() {
 }
 
 export default function AlertSound() {
-  const { data: settings } = useSettings();
   const [muted] = useMuted();
   const lastTimestampRef = useRef<string | null>(null);
 
-  const soundEnabled = settings?.alertSoundEnabled ?? settings?.soundAlerts ?? true;
 
   useEffect(() => {
     const checkAlerts = async () => {
-      if (muted || !soundEnabled) return;
+      if (muted) return;
       try {
         const { data } = await api.get<AlertItem[]>('/alerts', {
           params: { status: 'PENDING', severity: 'CRITICAL,HIGH', limit: 1 },
@@ -82,7 +79,7 @@ export default function AlertSound() {
     checkAlerts();
     const interval = setInterval(checkAlerts, 10000);
     return () => clearInterval(interval);
-  }, [muted, soundEnabled]);
+  }, [muted]);
 
   return null;
 }

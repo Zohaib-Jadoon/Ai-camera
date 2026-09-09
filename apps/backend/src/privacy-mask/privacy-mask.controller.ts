@@ -6,7 +6,8 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { Role } from '@prisma/client';
-import { PrivacyMaskService, CreatePrivacyMaskDto } from './privacy-mask.service';
+import { PrivacyMaskService } from './privacy-mask.service';
+import { CreatePrivacyMaskDto, UpdatePrivacyMaskDto } from './dto/privacy-mask.dto';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 
 @ApiTags('privacy-masks')
@@ -40,7 +41,7 @@ export class PrivacyMaskController {
   @ApiOperation({ summary: 'Update a privacy mask (resize/move)' })
   update(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: Partial<CreatePrivacyMaskDto>,
+    @Body() dto: UpdatePrivacyMaskDto,
   ) {
     return this.privacyMaskService.update(id, dto);
   }

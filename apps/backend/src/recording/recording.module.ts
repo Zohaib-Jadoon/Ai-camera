@@ -5,9 +5,10 @@ import { RecordingService } from './recording.service';
 import { RecordingController } from './recording.controller';
 import { RecordingScheduler } from './recording.scheduler';
 import { PrismaModule } from '../prisma/prisma.module';
+import { StorageModule } from '../storage/storage.module';
 
 @Module({
-  imports: [PrismaModule, ScheduleModule.forRoot(), ConfigModule],
+  imports: [PrismaModule, ScheduleModule.forRoot(), ConfigModule, StorageModule],
   providers: [RecordingService, RecordingScheduler],
   controllers: [RecordingController],
   exports: [RecordingService],

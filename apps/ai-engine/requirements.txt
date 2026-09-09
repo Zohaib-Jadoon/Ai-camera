@@ -1,8 +1,9 @@
 python-socketio>=5.11.4
 python-dotenv>=1.0.0
 opencv-python-headless>=4.10.0
-numpy>=2.4.6
-msvc-runtime>=14.40.0
+numpy>=1.26.4,<3
+msvc-runtime>=14.40.0; sys_platform == 'win32'
+uvicorn>=0.30,<1
 ultralytics>=8.2.0
 onnxruntime>=1.18.0
 scikit-learn>=1.5.1

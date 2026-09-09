@@ -1,7 +1,7 @@
 """
 Multi-camera processing manager for Madad Vision AI Engine.
 Runs purely as an asyncio background service connected via Socket.IO.
-No REST API, no FastAPI, no auth required.
+No REST API or FastAPI; authenticates to the backend with a shared service key.
 """
 # Load .env BEFORE any os.getenv() calls so all variables are available
 # when uvicorn starts the process (uvicorn does not auto-load .env files).
@@ -17,15 +17,21 @@ import logging
 import socketio
 import os
 import time
+import threading
+from pathlib import Path
 from datetime import datetime, timezone
 from .detector import Detector
 from .tracker import ObjectTracker
 from .intrusion import IntrusionDetector
 from .face_engine import FaceEngine
 from .stream_handler import StreamHandler
+from .privacy import apply_privacy_masks
 from .data_collector import DataCollector
 from .model_registry import ModelRegistry
 from .camera_manager import CameraManager
+from .inference_schedule import InferenceSchedule
+from .background_analysis import BackgroundAnalysis
+from .client_cleanup import close_client
 from .motion import MotionDetector  # Frigate-inspired motion gating
 from .stationary_classifier import (  # Frigate Phase-3: stationary persistence
     StationaryMotionClassifier,
@@ -47,11 +53,37 @@ logger = logging.getLogger(__name__)
 
 BACKEND_WS_URL = os.getenv("BACKEND_WS_URL", "http://localhost:3001")
 CONFIDENCE_THRESHOLD = float(os.getenv("MODEL_CONFIDENCE_THRESHOLD", "0.55"))
-AI_ENGINE_KEY = os.getenv("AI_ENGINE_KEY", "default-secret-key")
+AI_ENGINE_KEY = os.getenv("AI_ENGINE_KEY", "")
+if os.getenv("AI_ENGINE_KEY_FILE"):
+    from pathlib import Path
+    AI_ENGINE_KEY = Path(os.environ["AI_ENGINE_KEY_FILE"]).read_text().strip()
+if not AI_ENGINE_KEY:
+    raise RuntimeError("AI_ENGINE_KEY must be configured")
 
 # Shared infrastructure
 model_registry = ModelRegistry()
-detector = Detector(model_name="yolov8s-worldv2.pt", confidence=0.25)
+detector = Detector(model_name=os.getenv("YOLO_MODEL", "yolov8s-worldv2.pt"), confidence=CONFIDENCE_THRESHOLD, enable_tracking=False)
+detectors_by_path = {os.getenv("YOLO_MODEL", "yolov8s-worldv2.pt"): detector}
+detector_load_lock = asyncio.Lock()
+active_camera_detectors = {}
+
+
+async def get_camera_detector(sop_name):
+    """Load once per model path; camera SOPs never overwrite another model."""
+    model_path = model_registry.resolve(sop_name)
+    async with detector_load_lock:
+        selected = detectors_by_path.get(model_path)
+        if selected is None or not selected.is_loaded():
+            selected = await asyncio.to_thread(
+                Detector, model_name=model_path, confidence=CONFIDENCE_THRESHOLD,
+                enable_tracking=False,
+            )
+            if not selected.is_loaded():
+                raise RuntimeError(f"Camera model unavailable: {model_path}")
+            detectors_by_path[model_path] = selected
+    return selected, model_path
+
+
 face_engine = FaceEngine()
 
 # ── Advanced AI modules (shared across all cameras) ─────────────────────────
@@ -59,6 +91,30 @@ lpr_engine = LPREngine()
 reid_engine = ReIDEngine()
 clip_search = CLIPSearchEngine()
 forecast_engine = ForecastEngine()
+enrichment_lock = threading.Lock()
+enrichment_tracks = {}
+
+
+def analyze_enrichment(frame, detections, camera_id, masks, timestamp, index_clip):
+    """Serialize shared enrichment state, independently of the YOLO detection loop."""
+    with enrichment_lock:
+        faces = face_engine.process(frame)
+        plates = lpr_engine.process(detections, frame) if detections else []
+        identities = reid_engine.process(detections, frame, camera_id) if detections else []
+        if index_clip:
+            clip_search.index_frame(frame, camera_id, detections)
+        enrichment_tracks[camera_id] = {d['track_id'] for d in detections if d.get('track_id')}
+        lpr_engine.cleanup(set().union(*enrichment_tracks.values()))
+        reid_engine.cleanup(enrichment_tracks[camera_id], camera_id)
+        return masks, timestamp, faces, plates, identities
+
+
+def cleanup_enrichment(camera_id):
+    """Release per-camera enrichment caches after its native work has finished."""
+    with enrichment_lock:
+        enrichment_tracks.pop(camera_id, None)
+        lpr_engine.cleanup(set().union(*enrichment_tracks.values()))
+        reid_engine.cleanup(set(), camera_id)
 
 # Socket.IO client — AI Engine connects TO the backend gateway.
 # engineio_options: raise pingTimeout to 60s so brief GIL holds from OpenCV
@@ -73,6 +129,7 @@ sio = socketio.AsyncClient(
 
 camera_manager = CameraManager()
 active_streams: dict[str, StreamHandler] = {}
+active_camera_configs: dict[str, dict] = {}
 # Map camera_id -> IntrusionDetector so zone updates can be pushed to live tasks
 active_intrusion_detectors: dict[str, "IntrusionDetector"] = {}
 
@@ -81,6 +138,7 @@ active_intrusion_detectors: dict[str, "IntrusionDetector"] = {}
 # from a previous session — subsequent syncs do a normal diff.
 _first_sync_after_connect = True
 _heartbeat_task: asyncio.Task | None = None
+_camera_sync_lock = asyncio.Lock()
 
 
 @sio.event
@@ -101,6 +159,11 @@ async def disconnect():
 
 @sio.on('sync_cameras')
 async def on_sync_cameras(cameras):
+    async with _camera_sync_lock:
+        await _sync_cameras(cameras)
+
+
+async def _sync_cameras(cameras):
     global _first_sync_after_connect
     logger.info(f"Received {len(cameras)} cameras from backend")
 
@@ -113,23 +176,25 @@ async def on_sync_cameras(cameras):
         # for IDs that no longer exist in the database.
         logger.info("First sync — clearing all stale camera tasks")
         for old_id in camera_manager.ids():
-            camera_manager.remove(old_id)
+            await camera_manager.remove_and_wait(old_id)
             if old_id in active_streams:
-                active_streams[old_id].stop()
+                await asyncio.to_thread(active_streams[old_id].stop)
                 del active_streams[old_id]
             if old_id in active_intrusion_detectors:
                 del active_intrusion_detectors[old_id]
         _first_sync_after_connect = False
+        active_camera_configs.clear()
     else:
         # ── Subsequent syncs: diff-based add/remove ────────────────────────
         for old_id in camera_manager.ids():
             if old_id not in new_ids:
                 logger.info(f"Stopping task for removed camera {old_id}")
-                camera_manager.remove(old_id)
+                await camera_manager.remove_and_wait(old_id)
                 if old_id in active_streams:
-                    active_streams[old_id].stop()
+                    await asyncio.to_thread(active_streams[old_id].stop)
                     del active_streams[old_id]
                 active_intrusion_detectors.pop(old_id, None)
+                active_camera_configs.pop(old_id, None)
 
     # Start tasks for new cameras; restart tasks when rtsp_url changed
     for camera in cameras:
@@ -137,14 +202,16 @@ async def on_sync_cameras(cameras):
         existing = camera_manager.get(cid)
         new_rtsp = camera.get("rtsp_url", "")
 
-        if existing and existing.rtsp_url != new_rtsp:
+        old_config = active_camera_configs.get(cid, {})
+        active_camera_configs[cid] = camera
+        if existing and any(old_config.get(key) != camera.get(key) for key in ("rtsp_url", "detect_url", "record_url", "sop_name")):
             # URL changed — cancel old task and stream, then respawn
             logger.info(
-                f"Camera {cid} RTSP URL changed: {existing.rtsp_url!r} → {new_rtsp!r} — restarting task"
+                f"Camera {cid} stream configuration changed — restarting task"
             )
-            camera_manager.remove(cid)
+            await camera_manager.remove_and_wait(cid)
             if cid in active_streams:
-                active_streams[cid].stop()
+                await asyncio.to_thread(active_streams[cid].stop)
                 del active_streams[cid]
             active_intrusion_detectors.pop(cid, None)
             existing = None  # fall through to spawn below
@@ -158,7 +225,7 @@ async def on_sync_cameras(cameras):
 
 @sio.on('sync_embeddings')
 async def on_sync_embeddings(embeddings):
-    face_engine.load_embeddings(embeddings)
+    await asyncio.to_thread(face_engine.load_embeddings, embeddings)
 
 
 @sio.on('request_model_swap')
@@ -169,9 +236,9 @@ async def on_model_swap(data):
     The engine will load the registered .pt file without restarting.
     """
     sop_name = data.get("sop_name") if isinstance(data, dict) else None
-    model_path = model_registry.resolve(sop_name)
     try:
-        detector.load_model(model_path)
+        selected, model_path = await get_camera_detector(sop_name)
+        await asyncio.to_thread(selected.load_model, model_path)
         logger.info(f"Model hot-swapped to '{sop_name}' ({model_path})")
         if sio.connected:
             await sio.emit("model_swap_ack", {"sop_name": sop_name, "model_path": model_path, "status": "ok"})
@@ -271,8 +338,12 @@ async def on_test_stream(data: dict):
 
     def _probe(url: str):
         import cv2 as _cv2
-        cap = _cv2.VideoCapture(url)
+        cap = _cv2.VideoCapture(url, _cv2.CAP_FFMPEG, [
+            _cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000,
+            _cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000,
+        ])
         if not cap.isOpened():
+            cap.release()
             return False, "Cannot open stream — check URL, credentials, and network.", None, None
         ret, frame = cap.read()
         if not ret or frame is None:
@@ -291,7 +362,7 @@ async def on_test_stream(data: dict):
     except asyncio.TimeoutError:
         ok, message, resolution, fps = False, "Connection timed out (>8s). Verify the IP and RTSP path.", None, None
     except Exception as exc:
-        ok, message, resolution, fps = False, str(exc), None, None
+        ok, message, resolution, fps = False, 'Stream verification failed.', None, None
 
     if sio.connected:
         await sio.emit("stream_test_result", {
@@ -301,7 +372,7 @@ async def on_test_stream(data: dict):
             "resolution": resolution,
             "fps": fps,
         })
-    logger.info(f"Stream test for {rtsp_url}: ok={ok} message={message}")
+    logger.info("Stream test completed: ok=%s", ok)
 
 
 @sio.on('sync_zones')
@@ -375,7 +446,22 @@ async def health_heartbeat():
     while True:
         for cam_id in list(active_streams.keys()):
             if sio.connected and not cam_id.endswith(":record"):
-                await sio.emit('camera_status', {'camera_id': cam_id, 'status': 'ONLINE'})
+                stream = active_streams.get(cam_id)
+                await sio.emit('camera_status', {'camera_id': cam_id, 'status': 'ONLINE' if stream and stream.is_online else 'OFFLINE'})
+        if sio.connected:
+            selected_models = [active_camera_detectors.get(cid) for cid in camera_manager.ids()] or [detector]
+            object_loaded = all(model is not None and model.is_loaded() for model in selected_models)
+            object_error = ('MODEL_UNAVAILABLE' if not object_loaded else
+                            next((model.last_error for model in selected_models if model.last_error), None))
+            await sio.emit('engine_health', {
+                'object_detection': {'loaded': object_loaded, 'error': object_error},
+                'face_recognition': {'loaded': face_engine.is_loaded(), 'error': face_engine.last_error},
+            })
+            if object_loaded and not object_error and os.getenv('ENGINE_HEALTH_FILE'):
+                try:
+                    await asyncio.to_thread(Path(os.environ['ENGINE_HEALTH_FILE']).touch)
+                except OSError:
+                    logger.warning('Engine health marker unavailable')
         await asyncio.sleep(30)
 
 
@@ -421,8 +507,20 @@ async def process_camera(camera: dict):
     detect_url = camera.get("detect_url") or rtsp_url
     record_url = camera.get("record_url") or rtsp_url
     sop_name = camera.get("sop_name")  # optional SOP assigned to this camera
+    weapon_mode = sop_name in ("weapon", "weapon_detection")
+    camera_detector = None
+    model_path = None
+    schedule = InferenceSchedule(
+        fps=float(os.getenv("PROCESS_FPS", "10")),
+        idle_interval=float(os.getenv("IDLE_SCAN_INTERVAL", "0.5")),
+        continuous=weapon_mode,
+    )
+    metrics_started = time.monotonic()
+    metrics_count = 0
+    metrics_inference_ms = 0.0
+    last_auxiliary_run = float('-inf')
+    enrichment = BackgroundAnalysis()
     # 🐦 Privacy masks: normalised rectangles blacked-out before inference
-    privacy_masks = camera.get("privacy_masks", [])  # list of {x, y, width, height}
     tracker = ObjectTracker()
     intrusion_detector = IntrusionDetector()
     collector = DataCollector(sop_name=sop_name or "default")
@@ -436,7 +534,6 @@ async def process_camera(camera: dict):
     fall_detector = FallDetector()
     fight_detector = FightDetector()
     ppe_detector = PPEDetector()
-    known_track_names: dict[str, str] = {}
     # Tracks whether last inference frame contained threat-class objects.
     # When True we bypass motion gating so threats are never missed.
     _last_frame_had_threat: bool = False
@@ -446,7 +543,7 @@ async def process_camera(camera: dict):
     # Weapon / threat COCO classes — also includes fight/fall which come via safety_event
     THREAT_CLASSES = frozenset([
         'knife', 'scissors', 'weapon', 'handgun', 'gun',
-        'pistol', 'rifle', 'sword', 'axe', 'bat', 'baseball bat',
+        'pistol', 'rifle', 'firearm', 'sword', 'axe', 'bat', 'baseball bat',
     ])
 
     # Sync zones from the camera payload received from backend
@@ -458,15 +555,10 @@ async def process_camera(camera: dict):
     # Register so live zone updates can be pushed without restarting this task
     active_intrusion_detectors[camera_id] = intrusion_detector
 
-    logger.info(f"Starting processing for camera {camera_id} ({rtsp_url}) SOP={sop_name or 'default'}")
+    logger.info(f"Starting processing for camera {camera_id} SOP={sop_name or 'default'}")
 
     # 🐦 Frigate dual-stream: detect on low-res, keep record stream separate
     stream = StreamHandler(source=detect_url if detect_url else 0)
-    if record_url and record_url != detect_url:
-        record_stream = StreamHandler(source=record_url)
-        active_streams[f"{camera_id}:record"] = record_stream
-    else:
-        record_stream = None
     active_streams[camera_id] = stream
     motion = MotionDetector()   # Frigate-style: skip YOLO when nothing moves
     _motion_initialized = False  # lazy-init once first frame size is known
@@ -474,19 +566,9 @@ async def process_camera(camera: dict):
     try:
         stream.start()
     except Exception as e:
-        logger.error(f"Camera {camera_id}: stream start failed: {e}. Using synthetic frames.")
+        logger.error(f"Camera {camera_id}: stream start failed; capture unavailable")
 
-    # Grace period: give the background read thread time to open the RTSP
-    # connection before the main loop starts emitting status.  Without this,
-    # the loop fires immediately and emits OFFLINE (stream not yet open).
-    logger.info(f"Camera {camera_id}: waiting up to 8s for stream to come online...")
-    for _ in range(16):  # 16 × 0.5s = 8s max
-        if stream.is_online:
-            logger.info(f"Camera {camera_id}: stream online after startup wait")
-            break
-        await asyncio.sleep(0.5)
-    else:
-        logger.warning(f"Camera {camera_id}: stream not online after 8s — will keep retrying")
+    # The processing loop reports offline until real frames arrive.
 
     consecutive_errors = 0
     max_errors = 10
@@ -494,11 +576,13 @@ async def process_camera(camera: dict):
     status_report_interval = 5     # emit status every N seconds (5s for responsive UI)
     last_status_report = 0.0
     last_tracked_for_display: list = []  # latest detections for annotation
+    last_detection_masks = None
+    last_inference_sequence = -1
 
     loop = asyncio.get_event_loop()
 
     # Shared JPEG encoder — runs in executor, decoupled from detection loop
-    def _encode_and_emit_frame(f, dets):
+    def _encode_and_emit_frame(f, dets, masks):
         if f is None or f.size == 0:
             return None
         import base64 as _b64
@@ -540,7 +624,8 @@ async def process_camera(camera: dict):
                 _cv2e.putText(annotated, label, (x1 + 6, banner_y2 - 6),
                               _cv2e.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), font_thick, _cv2e.LINE_AA)
 
-        # Resize to 640px wide for high-speed encoding and 30 FPS bandwidth
+        annotated = apply_privacy_masks(annotated, masks)
+        # Resize to 640px wide for preview encoding.
         h, w = annotated.shape[:2]
         if w > 640:
             scale = 640 / w
@@ -552,18 +637,21 @@ async def process_camera(camera: dict):
 
     # Dedicated 30 FPS Live Stream Publisher Task (Decoupled from AI inference latency)
     async def _stream_publisher():
+        last_sequence = -1
         while True:
             try:
                 if stream.is_online and sio.connected:
-                    f = stream.get_frame()
-                    if f is not None and f.size > 0:
-                        _f_snap = f.copy()
-                        _d_snap = list(last_tracked_for_display)
+                    f, sequence = stream.get_frame_with_sequence()
+                    if f is not None and f.size > 0 and sequence != last_sequence:
+                        masks = active_camera_configs.get(camera_id, camera).get("privacy_masks", [])
+                        _f_snap = f
+                        _d_snap = list(last_tracked_for_display) if masks == last_detection_masks else []
                         jpeg_b64 = await loop.run_in_executor(
-                            None, _encode_and_emit_frame, _f_snap, _d_snap
+                            None, _encode_and_emit_frame, _f_snap, _d_snap, masks
                         )
-                        if jpeg_b64:
+                        if jpeg_b64 and masks == active_camera_configs.get(camera_id, camera).get("privacy_masks", []):
                             await sio.emit("frame", {"camera_id": camera_id, "data": jpeg_b64})
+                            last_sequence = sequence
                 await asyncio.sleep(0.033)  # Solid 30 FPS streaming!
             except asyncio.CancelledError:
                 break
@@ -594,20 +682,18 @@ async def process_camera(camera: dict):
                     await asyncio.sleep(1)
                     continue
 
-                frame = stream.get_frame()
+                if camera_detector is None:
+                    camera_detector, model_path = await get_camera_detector(sop_name)
+                    active_camera_detectors[camera_id] = camera_detector
+                    logger.info("Camera %s model=%s continuous_weapon_scan=%s", camera_id, model_path, weapon_mode)
 
-                # ── Privacy masks: black-out sensitive regions ───────────────────
-                if privacy_masks:
-                    import cv2 as _cv2_mask
-                    fh, fw = frame.shape[:2]
-                    frame = frame.copy()
-                    for m in privacy_masks:
-                        try:
-                            mx = int(m['x'] * fw); my = int(m['y'] * fh)
-                            mw = int(m['width'] * fw); mh = int(m['height'] * fh)
-                            frame[my:my+mh, mx:mx+mw] = 0
-                        except (KeyError, TypeError, ValueError):
-                            pass
+                frame, sequence = stream.get_frame_with_sequence()
+                if frame is None or sequence == last_inference_sequence:
+                    await asyncio.sleep(0.033)
+                    continue
+                last_inference_sequence = sequence
+                masks = active_camera_configs.get(camera_id, camera).get("privacy_masks", [])
+                frame = await asyncio.to_thread(apply_privacy_masks, frame, masks)
 
                 # ── Motion gating ────────────────────────────────────────────────
                 import cv2 as _cv2_motion
@@ -618,7 +704,7 @@ async def process_camera(camera: dict):
                     _motion_initialized = True
 
                 motion_boxes = motion.detect(gray_for_motion)
-                if not motion_boxes and not _last_frame_had_threat:
+                if not schedule.due(time.monotonic(), bool(motion_boxes), _last_frame_had_threat):
                     await asyncio.sleep(0.033)
                     continue
 
@@ -629,9 +715,24 @@ async def process_camera(camera: dict):
                 import cv2 as _cv2_yolo
                 resized_frame = _cv2_yolo.resize(frame, (yolo_w, yolo_h))
 
+                inference_started = time.monotonic()
+                schedule.started(inference_started)
                 raw_detections = await loop.run_in_executor(
-                    None, detector.detect, resized_frame
+                    None, camera_detector.detect, resized_frame
                 )
+                metrics_count += 1
+                metrics_inference_ms += (time.monotonic() - inference_started) * 1000
+                metrics_elapsed = time.monotonic() - metrics_started
+                if metrics_elapsed >= 10:
+                    logger.info("Camera %s model=%s inference_fps=%.2f mean_inference_ms=%.1f error=%s",
+                                camera_id, model_path, metrics_count / metrics_elapsed,
+                                metrics_inference_ms / metrics_count, camera_detector.last_error)
+                    metrics_started = time.monotonic()
+                    metrics_count = 0
+                    metrics_inference_ms = 0.0
+                if masks != active_camera_configs.get(camera_id, camera).get("privacy_masks", []):
+                    last_tracked_for_display = []
+                    continue
 
                 # Map boxes back to original resolution
                 scale_x = fw / yolo_w
@@ -652,7 +753,7 @@ async def process_camera(camera: dict):
                     motionless = det.get("motionless_count", 0)
                     thresh = get_stationary_threshold(det["object_type"])
 
-                    if thresh.motion_classifier_enabled and motionless >= STATIONARY_FRAMES:
+                    if det['object_type'] not in THREAT_CLASSES and thresh.motion_classifier_enabled and motionless >= STATIONARY_FRAMES:
                         _sb = det.get("smooth_box", det["box"])
                         median_box = (int(_sb[0]), int(_sb[1]), int(_sb[2]), int(_sb[3]))
                         stationary_classifier.ensure_anchor(tid, frame, median_box)
@@ -661,14 +762,6 @@ async def process_camera(camera: dict):
                         if stationary_classifier.evaluate(tid, frame, raw_box):
                             continue
                         stationary_classifier.on_active(tid)
-
-                    # Attach cached face recognition name
-                    if det.get("object_type") in ["person", "face"]:
-                        _tid = det.get("track_id")
-                        if _tid and _tid in known_track_names:
-                            det["person_name"] = known_track_names[_tid]
-                        elif known_track_names:
-                            det["person_name"] = list(known_track_names.values())[-1]
 
                     visible_tracked.append(det)
 
@@ -733,30 +826,30 @@ async def process_camera(camera: dict):
                             "timestamp":   datetime.now(timezone.utc).isoformat(),
                         })
 
-                # ── Face recognition (every 5th AI frame) ───────────────────────
-                if stream.frame_count % 5 == 0:
-                    faces = await loop.run_in_executor(None, face_engine.process, frame)
+                # Publish current boxes before optional slower enrichment work.
+                last_tracked_for_display = list(visible_tracked)
+                last_detection_masks = masks
+                # Consume completed work without awaiting a slow model. Results
+                # retain source time and are dropped after privacy-mask changes.
+                completed = enrichment.result()
+                if completed is not None and completed[0] == active_camera_configs.get(camera_id, camera).get('privacy_masks', []) and sio.connected:
+                    _, source_time, faces, plates, identities = completed
                     for face in faces:
-                        if face.get("is_known") and face.get("person_name"):
-                            p_name = face["person_name"]
-                            for det in visible_tracked:
-                                if det.get("object_type") in ["person", "face"]:
-                                    det["person_name"] = p_name
-                                    _tid2 = det.get("track_id")
-                                    if _tid2:
-                                        known_track_names[_tid2] = p_name
-                            if face.get("bbox"):
-                                visible_tracked.append({
-                                    "object_type": "face", "person_name": p_name,
-                                    "confidence": face.get("confidence", 0.95), "box": face["bbox"],
-                                })
-                        if sio.connected:
                             await sio.emit("face_event", {
                                 "camera_id": camera_id, "person_id": face.get("person_id"),
                                 "person_name": face.get("person_name"), "is_known": face["is_known"],
                                 "confidence": float(face["confidence"]),
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "timestamp": source_time,
                             })
+                    for evt in plates:
+                        await sio.emit('plate_detected', {**evt, 'camera_id': camera_id, 'timestamp': source_time})
+                    for evt in identities:
+                        await sio.emit('reid_match', {**evt, 'camera_id': camera_id, 'timestamp': source_time})
+                if time.monotonic() - last_auxiliary_run >= 1.0:
+                    if enrichment.submit(analyze_enrichment, frame, [dict(d) for d in visible_tracked],
+                                         camera_id, [dict(m) for m in masks], datetime.now(timezone.utc).isoformat(),
+                                         stream.frame_count % 3 == 0):
+                        last_auxiliary_run = time.monotonic()
 
                 # ── Traffic congestion ───────────────────────────────────────────
                 if zones and visible_tracked:
@@ -826,32 +919,6 @@ async def process_camera(camera: dict):
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
                             })
 
-                # ── LPR ──────────────────────────────────────────────────────────
-                if visible_tracked:
-                    for evt in await loop.run_in_executor(None, lpr_engine.process, visible_tracked, frame):
-                        if sio.connected:
-                            await sio.emit("plate_detected", {
-                                "camera_id": camera_id, "track_id": evt["track_id"],
-                                "object_type": evt["object_type"], "plate_text": evt["plate_text"],
-                                "plate_confidence": evt["plate_confidence"],
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                            })
-
-                # ── Cross-camera ReID ────────────────────────────────────────────
-                if visible_tracked:
-                    for evt in await loop.run_in_executor(None, reid_engine.process, visible_tracked, frame, camera_id):
-                        if sio.connected:
-                            await sio.emit("reid_match", {
-                                "camera_id": camera_id, "track_id": evt["track_id"],
-                                "global_id": evt["global_id"], "matched_camera": evt["matched_camera"],
-                                "similarity": evt["similarity"], "sighting_count": evt.get("sighting_count", 0),
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                            })
-
-                # ── CLIP frame indexing ──────────────────────────────────────────
-                if stream.frame_count % 15 == 0:
-                    await loop.run_in_executor(None, clip_search.index_frame, frame, camera_id, raw_detections)
-
                 # ── Predictive forecasting ───────────────────────────────────────
                 # FIXED: record_event(camera_id, object_type, count=1) has no 'confidence' kwarg
                 for det in visible_tracked:
@@ -862,12 +929,11 @@ async def process_camera(camera: dict):
 
                 # Update display overlay for stream publisher (shallow copy, not reference)
                 last_tracked_for_display = list(visible_tracked)
+                last_detection_masks = masks
 
                 speed_estimator.cleanup(active_track_ids)
                 wrongway_detector.cleanup(active_track_ids)
                 fall_detector.cleanup(active_track_ids)
-                lpr_engine.cleanup(active_track_ids)
-                reid_engine.cleanup(active_track_ids, camera_id)
 
                 consecutive_errors = 0
                 # Yield 1ms so stream publisher + socket IO can fire between inferences
@@ -886,7 +952,15 @@ async def process_camera(camera: dict):
                 else:
                     await asyncio.sleep(1)
     finally:
-        stream.stop()
+        publisher_task.cancel()
+        await asyncio.gather(publisher_task, return_exceptions=True)
+        await enrichment.close()
+        await asyncio.to_thread(cleanup_enrichment, camera_id)
+        await asyncio.to_thread(stream.stop)
+        if active_streams.get(camera_id) is stream:
+            active_streams.pop(camera_id, None)
+            active_intrusion_detectors.pop(camera_id, None)
+            active_camera_detectors.pop(camera_id, None)
 
 
 async def main():
@@ -903,51 +977,21 @@ async def main():
         logger.info("Shutting down AI Engine...")
     finally:
         connect_task.cancel()
+        if _heartbeat_task is not None:
+            _heartbeat_task.cancel()
+            await asyncio.gather(_heartbeat_task, return_exceptions=True)
+        await asyncio.gather(connect_task, return_exceptions=True)
         await camera_manager.shutdown_all()
         for stream in active_streams.values():
-            stream.stop()
+            await asyncio.to_thread(stream.stop)
         active_intrusion_detectors.clear()
-        if sio.connected:
-            await sio.disconnect()
+        await close_client(sio)
         logger.info("AI engine stopped")
 
 
-_main_task: asyncio.Task | None = None
+from .asgi import EngineApp
 
-async def app(scope, receive, send):
-    """
-    Minimal ASGI application shim for Uvicorn compatibility.
-    Runs the AI Engine's main loop as a background task.
-    """
-    global _main_task
-    if scope["type"] == "lifespan":
-        while True:
-            message = await receive()
-            if message["type"] == "lifespan.startup":
-                # Start the engine
-                _main_task = asyncio.create_task(main())
-                await send({"type": "lifespan.startup.complete"})
-            elif message["type"] == "lifespan.shutdown":
-                # Stop the engine — use proper None check so Pyright narrows the type
-                if _main_task is not None:
-                    _main_task.cancel()
-                    try:
-                        await _main_task
-                    except asyncio.CancelledError:
-                        pass
-                await send({"type": "lifespan.shutdown.complete"})
-                return
-    elif scope["type"] == "http":
-        # Reject HTTP requests
-        await send({
-            "type": "http.response.start",
-            "status": 404,
-            "headers": [(b"content-type", b"text/plain")],
-        })
-        await send({
-            "type": "http.response.body",
-            "body": b"AI Engine is a WebSocket-only service.",
-        })
+app = EngineApp(main)
 
 if __name__ == "__main__":
     try:

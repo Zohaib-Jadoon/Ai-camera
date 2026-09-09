@@ -16,6 +16,7 @@ async function bootstrap() {
     logger: ['error', 'warn', 'log', 'debug'],
     bodyParser: false,
   });
+  app.enableShutdownHooks();
 
   // ── Body parser — MUST be first middleware ────────────────────────────────
   // 20 MB gives plenty of headroom for compressed face photos (~50–200 KB).

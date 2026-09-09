@@ -61,6 +61,8 @@ export class WebhooksService {
           method: 'POST',
           headers,
           body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(10000),
+          redirect: 'error',
         });
 
         if (!res.ok) {
@@ -70,7 +72,7 @@ export class WebhooksService {
         }
       } catch (err: any) {
         this.logger.error(
-          `Webhook ${webhook.id} dispatch failed: ${err.message}`,
+          `Webhook ${webhook.id} dispatch failed`,
         );
       }
     }

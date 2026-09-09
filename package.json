@@ -13,7 +13,7 @@
   "devDependencies": {
     "typescript": "^5.8.2"
   },
-  "dependencies": {
+  "optionalDependencies": {
     "lightningcss-win32-x64-msvc": "^1.32.0"
   }
 }

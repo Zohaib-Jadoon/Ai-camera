@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { PDFDocument, StandardFonts, rgb, PageSizes } from 'pdf-lib';
+import { createHash } from 'crypto';
 
 @Injectable()
 export class EvidenceService {
@@ -9,21 +10,44 @@ export class EvidenceService {
   async exportAlertPdf(alertId: string): Promise<Buffer> {
     const alert = await this.prisma.alert.findUnique({
       where: { id: alertId },
-      include: { camera: true },
+      include: { camera: { select: { name: true, location: true } } },
     });
 
     if (!alert) {
       throw new NotFoundException(`Alert ${alertId} not found`);
     }
 
-    const detections = await this.prisma.detection.findMany({
-      where: { camera_id: alert.camera_id || undefined },
+    const detections = alert.camera_id ? await this.prisma.detection.findMany({
+      where: { camera_id: alert.camera_id, timestamp: {
+        gte: new Date(alert.sent_at.getTime() - 60_000),
+        lte: new Date(alert.sent_at.getTime() + 60_000),
+      } },
       orderBy: { timestamp: 'desc' },
       take: 5,
-    });
+    }) : [];
 
     // ── Build PDF ─────────────────────────────────────────────────────────────
     const doc = await PDFDocument.create();
+    const generatedAt = new Date().toISOString();
+    // A bounded, explicit allowlist prevents credentials/internal URLs leaking.
+    // JSON preserves Unicode and full values even when the visual summary is shortened.
+    const manifest = Buffer.from(JSON.stringify({
+      schema_version: 1, generated_at: generatedAt,
+      limitations: ['Automatically generated; requires human review',
+        'Nearby detections are context, not proof of causation',
+        'Snapshot and recording bytes are not included'],
+      alert: { id: alert.id, type: alert.alert_type, severity: alert.severity,
+        status: alert.status, review_status: alert.review_status ?? 'UNKNOWN',
+        sent_at: alert.sent_at.toISOString(), camera_id: alert.camera_id,
+        camera: alert.camera ? { name: alert.camera.name, location: alert.camera.location } : null },
+      context: { window_seconds_before: 60, window_seconds_after: 60, limit: 5,
+        detections: detections.map(d => ({ id: d.id, object_type: d.object_type,
+          confidence: d.confidence, timestamp: d.timestamp.toISOString() })) },
+    }, null, 2), 'utf8');
+    const manifestHash = createHash('sha256').update(manifest).digest('hex');
+    await doc.attach(manifest, 'evidence-manifest.json', {
+      mimeType: 'application/json', description: 'Full structured report data; no media included',
+    });
     const page = doc.addPage(PageSizes.A4);
     const { width, height } = page.getSize();
 
@@ -40,7 +64,7 @@ export class EvidenceService {
       yPos: number,
       opts: { size?: number; font?: typeof bold; color?: ReturnType<typeof rgb> } = {},
     ) => {
-      page.drawText(text, {
+      page.drawText(text.replace(/[^\x20-\x7e]/g, '?').slice(0, 95), {
         x,
         y: yPos,
         size: opts.size ?? 11,
@@ -60,7 +84,7 @@ export class EvidenceService {
     // Title
     write('Evidence Report', MARGIN, y, { size: 22, font: bold, color: rgb(0.05, 0.3, 0.7) });
     y -= LINE_H * 1.5;
-    write(`Generated: ${new Date().toISOString()}`, MARGIN, y, { size: 9, color: rgb(0.5, 0.5, 0.5) });
+    write(`Generated: ${generatedAt}`, MARGIN, y, { size: 9, color: rgb(0.5, 0.5, 0.5) });
     y -= LINE_H;
     hLine(y);
     y -= LINE_H;
@@ -74,9 +98,9 @@ export class EvidenceService {
       ['Type', alert.alert_type],
       ['Severity', alert.severity],
       ['Status', alert.status],
+      ['Human Review', alert.review_status ?? 'UNKNOWN'],
       ['Sent At', alert.sent_at.toISOString()],
       ['Camera', alert.camera ? `${alert.camera.name} (${alert.camera.location ?? 'N/A'})` : 'N/A'],
-      ['Camera RTSP', alert.camera?.rtsp_url ?? 'N/A'],
     ];
 
     for (const [label, value] of details) {
@@ -90,11 +114,11 @@ export class EvidenceService {
     y -= LINE_H;
 
     // Recent detections
-    write('Recent Detections', MARGIN, y, { size: 13, font: bold });
+    write('Context within 60 seconds (not proof of causation)', MARGIN, y, { size: 13, font: bold });
     y -= LINE_H * 1.2;
 
-    const cols = [MARGIN, MARGIN + 100, MARGIN + 180, MARGIN + 260];
-    const headers = ['Object', 'Confidence', 'Timestamp', 'Snapshot'];
+    const cols = [MARGIN, MARGIN + 150, MARGIN + 240];
+    const headers = ['Object', 'Confidence', 'Timestamp (UTC)'];
     for (let i = 0; i < headers.length; i++) {
       write(headers[i], cols[i], y, { font: bold, size: 10 });
     }
@@ -103,13 +127,19 @@ export class EvidenceService {
     y -= LINE_H;
 
     for (const d of detections) {
-      write(d.object_type, cols[0], y, { size: 9 });
+      write(d.object_type.slice(0, 25), cols[0], y, { size: 9 });
       write(`${(d.confidence * 100).toFixed(1)}%`, cols[1], y, { size: 9 });
       write(d.timestamp.toISOString().replace('T', ' ').slice(0, 19), cols[2], y, { size: 9 });
-      write(d.snapshot_url ? 'Available' : 'N/A', cols[3], y, { size: 9 });
       y -= LINE_H;
       if (y < MARGIN + LINE_H) break; // don't overflow page
     }
+
+    y -= LINE_H;
+    write('Media is not included. Full text is in the attached JSON manifest.', MARGIN, y, { size: 9 });
+    y -= LINE_H;
+    write('Manifest SHA-256 (integrity checksum, not a digital signature):', MARGIN, y, { size: 9 });
+    y -= LINE_H;
+    write(manifestHash, MARGIN, y, { size: 8 });
 
     // Footer
     y = MARGIN;

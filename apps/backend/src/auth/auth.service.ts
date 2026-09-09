@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
+import { Injectable, UnauthorizedException, ForbiddenException, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { UsersService } from '../users/users.service';
@@ -8,15 +8,7 @@ import { Role } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 
-/**
- * Fix 2: Refresh tokens are now hashed with bcrypt before storage.
- *
- * Why: Plain tokens stored in the DB mean a DB dump leaks every active session.
- * Pattern: Generate a cryptographically random token → return the raw token to
- * the client → store only the bcrypt hash. On lookup, we scan eligible (non-expired)
- * tokens and bcrypt.compare each. Because a user has very few active refresh tokens
- * this small N scan is acceptably cheap.
- */
+/** Opaque refresh tokens are stored as SHA-256 digests and rotated atomically. */
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
@@ -38,10 +30,13 @@ export class AuthService {
     return null;
   }
 
-  async login(user: any) {
+  async login(user: any, database: Pick<PrismaService, 'refreshToken'> = this.prisma) {
+    if (!user.isActive) {
+      throw new UnauthorizedException('Account is inactive');
+    }
     const payload = { email: user.email, sub: user.id, role: user.role };
     const access_token = this.jwtService.sign(payload);
-    const refresh_token = await this.createRefreshToken(user.id);
+    const refresh_token = await this.createRefreshToken(user.id, database);
     return {
       access_token,
       refresh_token,
@@ -55,8 +50,15 @@ export class AuthService {
   }
 
   async register(data: any) {
+    this.assertRegistrationAllowed();
     const user = await this.usersService.create(data);
     return this.login(user);
+  }
+
+  private assertRegistrationAllowed(): void {
+    if (this.configService.get<string>('ALLOW_SELF_REGISTRATION', 'false') !== 'true') {
+      throw new ForbiddenException('Self-registration is disabled. Contact your administrator for access.');
+    }
   }
 
   /**
@@ -95,6 +97,7 @@ export class AuthService {
 
     // 3. Create brand-new user
     if (!user) {
+      this.assertRegistrationAllowed();
       const randomPassword = crypto.randomBytes(32).toString('hex');
       user = await this.prisma.user.create({
         data: {
@@ -113,63 +116,49 @@ export class AuthService {
   }
 
   /**
-   * Fix 2: Store a bcrypt hash of the refresh token, not the raw token.
+   * Store an indexed digest of the refresh token, not the raw token.
    * Returns the raw token to the client.
    */
-  async createRefreshToken(userId: string): Promise<string> {
+  async createRefreshToken(userId: string, database: Pick<PrismaService, 'refreshToken'> = this.prisma): Promise<string> {
     const rawToken = crypto.randomBytes(40).toString('hex');
-    const tokenHash = await bcrypt.hash(rawToken, 10);
+    // High-entropy opaque tokens can use an indexed digest lookup. Unlike bcrypt,
+    // SHA-256 considers all 80 characters and does not truncate at 72 bytes.
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
 
     const expiresIn = this.configService.get<string>('JWT_REFRESH_EXPIRY', '7d');
     const expiresAt = new Date(Date.now() + this.parseExpiry(expiresIn));
 
-    await this.prisma.refreshToken.create({
+    await database.refreshToken.create({
       data: { token: tokenHash, user_id: userId, expiresAt },
     });
 
     return rawToken; // only the raw token leaves the server
   }
 
-  /**
-   * SEC-4 fix: Scope the refresh token lookup to the owning user.
-   *
-   * Previous code scanned ALL non-expired tokens across ALL users — a timing-
-   * attack vector and O(N users) query. Now we decode the JWT (without
-   * signature verification) to extract `sub` (userId), then filter to only
-   * that user's tokens. Users typically have 1–3 active sessions, so the
-   * bcrypt.compare loop stays trivially cheap.
-   */
+  /** Legacy bcrypt refresh tokens require a fresh login after this deployment. */
   async refreshTokens(rawRefreshToken: string) {
-    // Decode without verifying to extract the userId claim
-    const decoded = this.jwtService.decode(rawRefreshToken) as { sub?: string } | null;
-    if (!decoded?.sub) {
+    if (typeof rawRefreshToken !== 'string' || !/^[a-f0-9]{80}$/.test(rawRefreshToken)) {
       throw new UnauthorizedException('Invalid refresh token');
     }
-
-    // Scope the query to this specific user (SEC-4)
-    const candidates = await this.prisma.refreshToken.findMany({
-      where: { user_id: decoded.sub, expiresAt: { gt: new Date() } },
-      include: { user: true },
-      orderBy: { createdAt: 'desc' },
-      take: 5,
-    });
-
-    let match: (typeof candidates)[number] | null = null;
-    for (const candidate of candidates) {
-      const ok = await bcrypt.compare(rawRefreshToken, candidate.token);
-      if (ok) {
-        match = candidate;
-        break;
+    const tokenHash = crypto.createHash('sha256').update(rawRefreshToken).digest('hex');
+    return this.prisma.$transaction(async (tx) => {
+      const match = await tx.refreshToken.findUnique({
+        where: { token: tokenHash },
+        include: { user: true },
+      });
+      if (!match || match.expiresAt <= new Date() || !match.user.isActive) {
+        throw new UnauthorizedException('Invalid or expired refresh token');
       }
-    }
-
-    if (!match) {
-      throw new UnauthorizedException('Invalid or expired refresh token');
-    }
-
-    // Rotate: delete old hash, issue fresh token
-    await this.prisma.refreshToken.delete({ where: { id: match.id } });
-    return this.login(match.user);
+      // A conditional delete lets only one concurrent request consume the token.
+      // Replacement creation is in the same transaction, so failure restores it.
+      const consumed = await tx.refreshToken.deleteMany({
+        where: { id: match.id, token: tokenHash, expiresAt: { gt: new Date() } },
+      });
+      if (consumed.count !== 1) {
+        throw new UnauthorizedException('Invalid or expired refresh token');
+      }
+      return this.login(match.user, tx);
+    });
   }
 
   async logout(userId: string) {

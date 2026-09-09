@@ -1,4 +1,5 @@
 'use client';
+import { runUiAction } from '@/lib/ui-action';
 
 /**
  * Zone Editor — Frigate-inspired canvas-based zone drawing on the live feed.
@@ -314,7 +315,7 @@ export default function ZonesPage() {
                       Give it a name and save, or draw again.
                     </p>
                     <button
-                      onClick={handleSaveZone}
+                      onClick={() => runUiAction(handleSaveZone)}
                       disabled={createZone.isPending}
                       className="px-4 py-1.5 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition-colors disabled:opacity-60"
                     >

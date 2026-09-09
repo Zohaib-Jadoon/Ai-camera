@@ -9,7 +9,7 @@ import * as bcrypt from 'bcrypt';
 const prisma = new PrismaClient();
 
 async function main() {
-  const email = 'admin@madadvision.ai';
+  const email = process.env.SEED_ADMIN_EMAIL || 'admin@madadvision.ai';
 
   const existing = await prisma.user.findUnique({ where: { email } });
   if (existing) {
@@ -17,7 +17,11 @@ async function main() {
     return;
   }
 
-  const password = await bcrypt.hash('Admin@12345', 12);
+  const initialPassword = process.env.SEED_ADMIN_PASSWORD;
+  if (!initialPassword || initialPassword.length < 16 || Buffer.byteLength(initialPassword, 'utf8') > 72) {
+    throw new Error('Set SEED_ADMIN_PASSWORD to a unique password of at least 16 characters and at most 72 UTF-8 bytes');
+  }
+  const password = await bcrypt.hash(initialPassword, 12);
 
   const admin = await prisma.user.create({
     data: {
@@ -32,7 +36,6 @@ async function main() {
   console.log('');
   console.log('✅ Admin account created successfully!');
   console.log('   Email   :', admin.email);
-  console.log('   Password: Admin@12345');
   console.log('   Role    : ADMIN');
   console.log('');
   console.log('⚠  Change the password immediately after first login.');
@@ -40,7 +43,7 @@ async function main() {
 
 main()
   .catch((e) => {
-    console.error('❌ Seed failed:', e.message);
-    process.exit(1);
+    console.error('Seed failed. Verify database access and SEED_ADMIN_PASSWORD configuration.');
+    process.exitCode = 1;
   })
   .finally(() => prisma.$disconnect());

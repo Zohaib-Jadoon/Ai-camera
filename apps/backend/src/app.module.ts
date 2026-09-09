@@ -5,6 +5,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { CacheModule } from '@nestjs/cache-manager';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { AppController } from './app.controller';
+import { ReadinessController } from './readiness.controller';
 import { AppService } from './app.service';
 import { CameraModule } from './camera/camera.module';
 import { AuthModule } from './auth/auth.module';
@@ -41,13 +42,17 @@ import * as Joi from 'joi';
     // instead of crashing silently on the first DB or JWT call.
     ConfigModule.forRoot({
       isGlobal: true,
-      envFilePath: ['.env', '.env.local'],
+      envFilePath: ['.env', 'apps/backend/.env', '.env.local'],
       validationSchema: Joi.object({
         DATABASE_URL: Joi.string().uri().required(),
         JWT_SECRET: Joi.string().min(16).required(),
         JWT_REFRESH_SECRET: Joi.string().min(16).required(),
         AI_ENGINE_KEY: Joi.string().min(8).required(),
-        JWT_EXPIRES_IN: Joi.string().default('7d'),
+        CAMERA_ENCRYPTION_KEY: Joi.string().pattern(/^[a-fA-F0-9]{64}$/).required(),
+        CAMERA_ENCRYPTION_KEY_ID: Joi.string().pattern(/^[a-zA-Z0-9_-]{1,40}$/).default('primary'),
+        ALLOW_LEGACY_CAMERA_CREDENTIALS: Joi.string().valid('true', 'false').default('true'),
+        ALLOW_SELF_REGISTRATION: Joi.string().valid('true', 'false').default('false'),
+        JWT_EXPIRES_IN: Joi.string().default('15m'),
         PORT: Joi.number().default(3001),
         CORS_ORIGIN: Joi.string().default('*'),
         CACHE_TTL: Joi.number().default(30),
@@ -100,7 +105,7 @@ import * as Joi from 'joi';
     NotificationsModule,
     CameraGroupsModule,
   ],
-  controllers: [AppController],
+  controllers: [AppController, ReadinessController],
   providers: [
     AppService,
     {

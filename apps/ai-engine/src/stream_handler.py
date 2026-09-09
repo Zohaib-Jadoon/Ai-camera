@@ -1,242 +1,128 @@
-"""
-StreamHandler — production RTSP/webcam video capture.
-Uses a background thread to decode frames at full speed so the
-main async processing loop never blocks on cap.read().
-"""
+"""Thread-backed capture with bounded freshness and interruptible reconnects."""
 from __future__ import annotations
+
+import logging
+import threading
+import time
 import cv2
 import numpy as np
-import threading
-import logging
-import time
 
 logger = logging.getLogger(__name__)
 
-_RECONNECT_BASE_DELAY = 5.0   # starting delay in seconds
-_RECONNECT_MAX_DELAY  = 60.0  # cap at 60 seconds
-
-
 
 class StreamHandler:
-    """
-    Thread-backed video capture with automatic reconnection.
+    """Keep one decoded frame; report online only while real frames arrive."""
 
-    Usage:
-        stream = StreamHandler(source="rtsp://...")
-        stream.start()
-        frame = stream.get_frame()
-        stream.stop()
-    """
+    MAX_FRAME_AGE = 5.0
 
     def __init__(self, source: str | int = 0):
         self.source = source
-        self.frame_count: int = 0
-        self._cap: cv2.VideoCapture | None = None
+        self.frame_count = 0
+        self._cap = None
         self._lock = threading.Lock()
-        self._latest_frame: np.ndarray | None = None
+        self._latest_frame = None
+        self._last_frame_time = 0.0
         self._running = False
-        self._thread: threading.Thread | None = None
-        self._connected = False  # tracks whether stream is actually delivering frames
-        self._fail_count: int = 0  # consecutive open failures for backoff
-        self._last_frame_time: float = 0.0  # monotonic time of last successful frame
-
+        self._connected = False
+        self._thread = None
+        self._stop_event = threading.Event()
 
     def start(self) -> None:
-        """Start the background read thread. Stream opens inside the thread."""
+        """Start capture once; the capture thread owns the OpenCV resource."""
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
         self._running = True
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
         self._thread.start()
-        logger.info(f"StreamHandler started: {self.source}")
+        logger.info("Video capture started")
 
     def _open(self) -> bool:
-        """Open capture, return True on success.
-
-        Key changes:
-        - TCP pre-check via socket.connect_ex before touching FFmpeg.
-          If the port is not reachable, we skip all 8 URL candidates instantly
-          instead of waiting 8s × 8 = 64s (which would starve Socket.IO heartbeats).
-        - 3s timeout per candidate (not 8s) to keep total block time short.
-        - Tries common mobile-app RTSP paths automatically.
-        """
-        import socket as _socket
-
-        src = int(self.source) if str(self.source).isdigit() else self.source
-
-        if isinstance(src, str):
-            # ── TCP pre-check ───────────────────────────────────────────────
-            # Parse host:port from the RTSP URL.  If the TCP port isn't open,
-            # skip all OpenCV/FFmpeg attempts entirely — they'd just block for
-            # timeout × n_candidates seconds while holding the GIL.
-            try:
-                from urllib.parse import urlparse
-                parsed = urlparse(src)
-                host = parsed.hostname or ""
-                port = parsed.port or 554
-                sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-                sock.settimeout(1.0)           # 1-second TCP handshake check
-                result = sock.connect_ex((host, port))
-                sock.close()
-                if result != 0:
-                    # Port closed / host unreachable — no point trying OpenCV
-                    self._connected = False
-                    logger.debug(
-                        f"TCP pre-check failed for {host}:{port} (err={result}) "
-                        f"— skipping RTSP open"
-                    )
-                    return False
-                logger.debug(f"TCP pre-check OK for {host}:{port} — trying RTSP")
-            except Exception as tcp_err:
-                logger.debug(f"TCP pre-check exception: {tcp_err}")
-                # Continue anyway — let OpenCV try
-
-            # ── Build URL candidate list ────────────────────────────────────
-            base = src.rstrip('/')
-            candidates = [src]
-            if src.endswith('/') or src.count('/') <= 2:
-                candidates += [
-                    f"{base}/h264_ulaw.sdp",   # IP Webcam (Android)
-                    f"{base}/video",            # IP Webcam alternative
-                    f"{base}/live",             # DJI / generic
-                    f"{base}/h264",             # iVCam / generic
-                    f"{base}/stream",           # various apps
-                    f"{base}/0",                # MediaMTX / go2rtc
-                    f"{base}/cam",              # various
-                ]
-
-            for url in candidates:
-                logger.info(f"Trying RTSP URL: {url}")
-                # Force TCP transport — eliminates UDP packet loss / H264 decode
-                # errors that occur on WiFi. Must be set before VideoCapture().
-                import os as _os
-                _os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
-                # 5s timeout — TCP handshake takes slightly longer than UDP
-                cap = cv2.VideoCapture(
-                    url,
-                    cv2.CAP_FFMPEG,
-                    [
-                        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5_000,
-                        cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5_000,
-                    ],
-                )
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-                if cap.isOpened():
-                    self._cap = cap
-                    self._connected = True
-                    if url != src:
-                        logger.info(
-                            f"Stream opened on alternative path: {url} "
-                            f"(update your camera RTSP URL to this)"
-                        )
-                    else:
-                        logger.info(f"Stream opened: {url}")
-                    return True
-
-                cap.release()
-
-            self._connected = False
-            logger.error(
-                f"Cannot open stream: {self.source}\n"
-                f"  Tried {len(candidates)} URL(s). Check:\n"
-                f"  1. PC and phone on the SAME WiFi (no AP Isolation)\n"
-                f"  2. Mobile app RTSP URL — look in the app's settings\n"
-                f"  3. Firewall allowing inbound connections on the port"
+        source = int(self.source) if str(self.source).isdigit() else self.source
+        if isinstance(source, str):
+            self._cap = cv2.VideoCapture(
+                source, cv2.CAP_FFMPEG,
+                [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
+                 cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000],
             )
-            return False
         else:
-            cap = cv2.VideoCapture(src)
-            if cap.isOpened():
-                self._cap = cap
-                self._connected = True
-                return True
-            cap.release()
-            self._connected = False
-            logger.error(f"Cannot open webcam index: {self.source}")
-            return False
+            self._cap = cv2.VideoCapture(source)
+        if self._cap.isOpened():
+            self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            return True
+        return False
 
-    def _read_loop(self) -> None:
-        """Background thread that continuously reads frames."""
-        while self._running:
-            if self._cap is None or not self._cap.isOpened():
-                # Only mark offline if we were previously connected — avoids
-                # a false OFFLINE flash before the first successful open.
-                if self._connected:
-                    self._connected = False
-                    logger.warning(f"Stream {self.source} lost — reconnecting")
-                # Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped)
-                delay = min(
-                    _RECONNECT_BASE_DELAY * (2 ** self._fail_count),
-                    _RECONNECT_MAX_DELAY,
-                )
-                logger.warning(
-                    f"Stream {self.source} disconnected — reconnecting in {delay:.0f}s"
-                )
-                time.sleep(delay)
-                success = self._open()
-                if success:
-                    self._fail_count = 0
-                else:
-                    self._fail_count += 1
-                continue
-
-            ret, frame = self._cap.read()
-            if ret and frame is not None:
-                with self._lock:
-                    self._latest_frame = frame
-                    self.frame_count += 1
-                    self._last_frame_time = time.monotonic()
-                    if not self._connected:
-                        self._connected = True
-                        self._fail_count = 0  # reset backoff on first successful frame
-            else:
-                logger.warning(f"Frame read failed for {self.source}")
-                time.sleep(0.5)
-
-    def get_frame(self) -> np.ndarray:
-        """Return the most recent frame decoded by the background thread."""
+    def _clear_frame(self) -> None:
         with self._lock:
-            if self._latest_frame is not None:
-                return self._latest_frame.copy()
+            self._connected = False
+            self._latest_frame = None
+            self._last_frame_time = 0.0
 
-        # Return a black placeholder if no frame is available yet
-        placeholder = np.zeros((480, 640, 3), dtype=np.uint8)
-        cv2.putText(
-            placeholder,
-            f"Connecting... {self.source}",
-            (40, 240),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (200, 200, 200),
-            2,
-        )
-        return placeholder
-
-    def stop(self) -> None:
-        self._running = False
-        self._connected = False
-        if self._thread:
-            self._thread.join(timeout=2.0)
-        if self._cap:
+    def _release(self) -> None:
+        if self._cap is not None:
             self._cap.release()
             self._cap = None
-        logger.info(f"StreamHandler stopped: {self.source}")
+
+    def _read_loop(self) -> None:
+        failures = 0
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    if self._cap is None and not self._open():
+                        raise RuntimeError("Capture unavailable")
+                    ret, frame = self._cap.read()
+                    if not ret or frame is None or frame.size == 0:
+                        raise RuntimeError("Frame unavailable")
+                    if self._stop_event.is_set():
+                        break
+                    with self._lock:
+                        self._latest_frame = frame
+                        self.frame_count += 1
+                        self._last_frame_time = time.monotonic()
+                        self._connected = True
+                    failures = 0
+                except Exception:
+                    self._clear_frame()
+                    self._release()
+                    delay = min(5.0 * (2 ** min(failures, 4)), 60.0)
+                    failures += 1
+                    # Never log the source or native diagnostics: they can contain credentials.
+                    logger.warning("Video capture interrupted; retrying in %.0fs", delay)
+                    self._stop_event.wait(delay)
+        finally:
+            self._clear_frame()
+            self._release()
+            self._running = False
+
+    def get_frame_with_sequence(self) -> tuple[np.ndarray | None, int]:
+        """Return only a fresh frame and its sequence, atomically."""
+        with self._lock:
+            if (self._connected and self._latest_frame is not None
+                    and time.monotonic() - self._last_frame_time <= self.MAX_FRAME_AGE):
+                return self._latest_frame.copy(), self.frame_count
+            return None, self.frame_count
+
+    def get_frame(self) -> np.ndarray | None:
+        """Return a fresh decoded frame or None; never fabricate placeholder footage."""
+        return self.get_frame_with_sequence()[0]
+
+    def stop(self) -> None:
+        """Signal capture shutdown without releasing a resource another thread is using."""
+        self._running = False
+        self._stop_event.set()
+        self._clear_frame()
+        if self._thread and self._thread is not threading.current_thread():
+            self._thread.join(timeout=2.0)
+        logger.info("Video capture stopped")
 
     @property
     def is_running(self) -> bool:
+        """Whether capture has been started and not stopped."""
         return self._running
 
     @property
     def is_online(self) -> bool:
-        """True when the stream is open and delivering frames.
-        
-        Returns False if:
-        - Stream was never opened successfully
-        - Stream was opened but no frames arrived within 15 seconds
-        - Stream was stopped
-        """
-        if not self._connected:
-            return False
-        # If we haven't received a frame in 15 seconds, consider it offline
-        if self._last_frame_time > 0 and (time.monotonic() - self._last_frame_time) > 15.0:
-            return False
-        return True
+        """Whether the capture thread has recently delivered a real frame."""
+        with self._lock:
+            return (self._running and self._connected and self._latest_frame is not None
+                    and time.monotonic() - self._last_frame_time <= self.MAX_FRAME_AGE)

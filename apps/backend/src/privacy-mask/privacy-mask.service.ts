@@ -1,14 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-
-export interface CreatePrivacyMaskDto {
-  camera_id: string;
-  label?: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+import { EventsGateway } from '../events/events.gateway';
+import { CreatePrivacyMaskDto, UpdatePrivacyMaskDto } from './dto/privacy-mask.dto';
 
 /**
  * PrivacyMaskService — manages rectangular regions that are blacked-out
@@ -21,10 +14,22 @@ export interface CreatePrivacyMaskDto {
  */
 @Injectable()
 export class PrivacyMaskService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly gateway: EventsGateway) {}
+
+  private validateBounds(mask: { x: number; y: number; width: number; height: number }) {
+    const values = [mask.x, mask.y, mask.width, mask.height];
+    if (values.some((value) => typeof value !== 'number' || !Number.isFinite(value)) ||
+        mask.x < 0 || mask.y < 0 || mask.width <= 0 || mask.height <= 0 ||
+        mask.x + mask.width > 1.000001 || mask.y + mask.height > 1.000001) {
+      throw new BadRequestException('Privacy mask must fit inside the camera frame');
+    }
+  }
 
   async create(dto: CreatePrivacyMaskDto) {
-    return this.prisma.privacyMask.create({ data: dto });
+    this.validateBounds(dto);
+    const mask = await this.prisma.privacyMask.create({ data: dto });
+    await this.gateway.broadcastCameraSync();
+    return mask;
   }
 
   async findByCamera(cameraId: string) {
@@ -42,10 +47,17 @@ export class PrivacyMaskService {
   }
 
   async remove(id: string) {
-    return this.prisma.privacyMask.delete({ where: { id } });
+    const mask = await this.prisma.privacyMask.delete({ where: { id } });
+    await this.gateway.broadcastCameraSync();
+    return mask;
   }
 
-  async update(id: string, dto: Partial<CreatePrivacyMaskDto>) {
-    return this.prisma.privacyMask.update({ where: { id }, data: dto });
+  async update(id: string, dto: UpdatePrivacyMaskDto) {
+    const existing = await this.prisma.privacyMask.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException('Privacy mask not found');
+    this.validateBounds({ ...existing, ...dto });
+    const mask = await this.prisma.privacyMask.update({ where: { id }, data: dto });
+    await this.gateway.broadcastCameraSync();
+    return mask;
   }
 }

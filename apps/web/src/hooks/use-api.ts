@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
+import { settingsFromApi, settingsToApi, type SettingsResponse } from '@/lib/settings-contract';
 
 export interface Camera {
   id: string;
@@ -16,6 +17,7 @@ export interface Camera {
 }
 
 export interface AlertItem {
+  review_status?: 'PENDING' | 'CONFIRMED' | 'DISMISSED';
   id: string;
   event_id: string;
   alert_type: string;
@@ -373,9 +375,10 @@ export function useFaceEvents(limit = 50) {
 
 // ─── Users ────────────────────────────────────────────────────────────────────
 
-export function useUsers() {
+export function useUsers(enabled = true) {
   return useQuery({
     queryKey: ['users'],
+    enabled,
     queryFn: async () => {
       const { data } = await api.get<User[]>('/users');
       return data;
@@ -409,8 +412,8 @@ export function useSettings() {
   return useQuery({
     queryKey: ['settings'],
     queryFn: async () => {
-      const { data } = await api.get<AppSettings>('/settings');
-      return data;
+      const { data } = await api.get<SettingsResponse>('/settings');
+      return settingsFromApi(data);
     },
   });
 }
@@ -419,8 +422,8 @@ export function useUpdateSettings() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (payload: AppSettings) => {
-      const { data } = await api.patch<AppSettings>('/settings', payload);
-      return data;
+      const { data } = await api.patch<SettingsResponse>('/settings', settingsToApi(payload));
+      return settingsFromApi(data);
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['settings'] }),
   });

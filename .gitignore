@@ -30,3 +30,7 @@ apps/backend/temp_recordings/
 .vscode/
 .graphify_python
 skills-lock.json
+secrets/
+backups/
+certificates/
+apps/ai-engine/.weights/

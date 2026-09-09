@@ -73,17 +73,16 @@ class ModelRegistry:
         - Registered custom models in registry.json
         - Base fallback to yolov8n.pt or yolov8s-worldv2.pt
         """
-        if sop_name in ["weapon_detection", "weapon", "fire_smoke", "general_detection"]:
-            if sop_name == "weapon_detection":
-                return "yolov8s-worldv2.pt"
-            
-        base = str(MODELS_DIR / "yolov8n.pt") if (MODELS_DIR / "yolov8n.pt").exists() else "yolov8n.pt"
+        if sop_name == "weapon":
+            sop_name = "weapon_detection"
         if sop_name and sop_name in self._data:
             path = self._data[sop_name]["model_path"]
             if Path(path).exists():
                 return path
-            logger.warning(f"ModelRegistry: model file missing for '{sop_name}', using base model")
-        return base
+            raise FileNotFoundError(f"Registered model missing for '{sop_name}'")
+        if sop_name == "weapon_detection":
+            return os.getenv("WEAPON_MODEL", "yolov8s-worldv2.pt")
+        return os.getenv("YOLO_MODEL", "yolov8s-worldv2.pt")
 
     def list_models(self) -> list[dict]:
         """Return all registered models as a list."""

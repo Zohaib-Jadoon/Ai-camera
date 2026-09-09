@@ -9,6 +9,9 @@ import { StartStreamDto, TestConnectionDto } from './dto/streaming.dto';
 import { Response } from 'express';
 import * as path from 'path';
 import * as fs from 'fs';
+import { PrismaService } from '../prisma/prisma.service';
+import { ConfigService } from '@nestjs/config';
+import { CameraCredentials } from '../common/utils/camera-credentials';
 
 const HLS_ROOT = process.env.HLS_DIR ?? '/tmp/hls';
 
@@ -17,13 +20,14 @@ const HLS_ROOT = process.env.HLS_DIR ?? '/tmp/hls';
 @Controller('streaming')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class StreamingController {
-  constructor(private streamingService: StreamingService) {}
+  constructor(private streamingService: StreamingService, private prisma: PrismaService, private config: ConfigService) {}
 
   @Post('start')
   @Roles(Role.ADMIN, Role.SECURITY_OPERATOR)
   @ApiOperation({ summary: 'Start HLS stream for a camera' })
-  startStream(@Body() body: StartStreamDto) {
-    return this.streamingService.startHlsStream(body.cameraId, body.rtspUrl);
+  async startStream(@Body() body: StartStreamDto) {
+    const camera = await this.prisma.camera.findUniqueOrThrow({ where: { id: body.cameraId }, include: { privacyMasks: true } });
+    return this.streamingService.startHlsStream(camera.id, new CameraCredentials(this.config).decrypt(camera.rtsp_url), camera.privacyMasks);
   }
 
   @Delete(':cameraId')
@@ -48,15 +52,18 @@ export class StreamingController {
    * Security: segments are short-lived (2s) and the playlist rotates every 10s.
    */
   @Get('hls/:cameraId/:filename')
-  serveHls(
+  async serveHls(
     @Param('cameraId') cameraId: string,
     @Param('filename') filename: string,
     @Res() res: Response,
   ) {
     // Reject path traversal
-    if (filename.includes('..') || !/^[a-zA-Z0-9_.-]+$/.test(filename)) {
+    if (!/^[a-fA-F0-9-]{36}$/.test(cameraId) || filename.includes('..') || !/^[a-zA-Z0-9_.-]+$/.test(filename)) {
       throw new NotFoundException('Invalid filename');
     }
+
+    const masks = await this.prisma.privacyMask.findMany({ where: { camera_id: cameraId } });
+    if (!this.streamingService.matchesPrivacy(cameraId, masks)) throw new NotFoundException('Stream privacy policy changed; restart stream');
 
     const filePath = path.join(HLS_ROOT, cameraId, filename);
     if (!fs.existsSync(filePath)) {
@@ -69,7 +76,6 @@ export class StreamingController {
 
     res.setHeader('Content-Type', contentType);
     res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Access-Control-Allow-Origin', '*');
     return res.sendFile(path.resolve(filePath));
   }
 }

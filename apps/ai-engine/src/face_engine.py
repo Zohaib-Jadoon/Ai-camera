@@ -1,11 +1,12 @@
 """
 Face recognition engine using InsightFace (ArcFace + RetinaFace).
-Falls back to mock when InsightFace is unavailable.
+Reports unavailable recognition when InsightFace cannot initialize.
 Fetches known embeddings from backend on startup.
 """
 import numpy as np
 import logging
 import os
+import threading
 from typing import TYPE_CHECKING, Optional
 
 from .config import config
@@ -21,7 +22,7 @@ try:
     INSIGHTFACE_AVAILABLE = True
 except ImportError:
     INSIGHTFACE_AVAILABLE = False
-    logger.warning("InsightFace not available — using mock face engine")
+    logger.warning("InsightFace not available — face recognition unavailable")
 
 
 class FaceEngine:
@@ -30,12 +31,16 @@ class FaceEngine:
     def __init__(self):
         self.app: Optional["FaceAnalysis"] = None
         self._loaded = False
+        self._lock = threading.RLock()
+        self.last_error = "MODEL_UNAVAILABLE"
         # {person_id: (name, embedding_vector, alert_message, alert_enabled)}
         self.known_faces: dict[str, tuple[str, np.ndarray, Optional[str], bool]] = {}
 
         if INSIGHTFACE_AVAILABLE:
             try:
                 import onnxruntime as ort
+                if hasattr(ort, 'preload_dlls') and 'CUDAExecutionProvider' in ort.get_available_providers():
+                    ort.preload_dlls()
                 has_cuda = "CUDAExecutionProvider" in ort.get_available_providers()
             except ImportError:
                 has_cuda = False
@@ -43,11 +48,20 @@ class FaceEngine:
             try:
                 root = os.getenv("INSIGHTFACE_ROOT", os.path.expanduser("~/.insightface"))
                 ctx_id = int(os.getenv("INSIGHTFACE_CTX_ID", "0" if has_cuda else "-1"))
-                self.app = FaceAnalysis(name="buffalo_l", root=root)
+                if ctx_id >= 0 and not has_cuda:
+                    raise RuntimeError('GPU face recognition requested but ONNX CUDA provider is unavailable')
+                providers = [('CUDAExecutionProvider', {'device_id': ctx_id}), 'CPUExecutionProvider'] if ctx_id >= 0 else ['CPUExecutionProvider']
+                self.app = FaceAnalysis(name="buffalo_l", root=root, providers=providers,
+                                        allowed_modules=['detection', 'recognition'])
                 self.app.prepare(ctx_id=ctx_id, det_size=(320, 320))
+                if ctx_id >= 0 and any('CUDAExecutionProvider' not in model.session.get_providers()
+                                       for model in self.app.models.values()):
+                    raise RuntimeError('ONNX face model silently fell back from CUDA')
                 self._loaded = True
+                self.last_error = None
                 logger.info(f"InsightFace (buffalo_l) loaded successfully (ctx_id={ctx_id})")
             except Exception as e:
+                self.app = None
                 logger.error(f"InsightFace load failed: {e}")
 
     def is_loaded(self) -> bool:
@@ -55,11 +69,16 @@ class FaceEngine:
 
     def register_face(self, person_id: str, name: str, embedding: list[float], alert_message: Optional[str] = None, alert_enabled: bool = False):
         """Register a known face embedding."""
-        self.known_faces[person_id] = (name, np.array(embedding, dtype=np.float32), alert_message, alert_enabled)
+        with self._lock:
+            self.known_faces[person_id] = (name, np.array(embedding, dtype=np.float32), alert_message, alert_enabled)
         logger.info(f"Registered face: {name} (id={person_id}, alert_enabled={alert_enabled})")
 
     def load_embeddings(self, data: list):
         """Load known face embeddings from a provided list of records."""
+        with self._lock:
+            self._load_embeddings(data)
+
+    def _load_embeddings(self, data: list):
         try:
             self.known_faces.clear()
             for item in data:
@@ -78,7 +97,11 @@ class FaceEngine:
 
     def extract_embedding(self, frame) -> Optional[list[float]]:
         """Extract embedding for the largest face in the frame."""
-        if frame is None or self.app is None:
+        with self._lock:
+            return self._extract_embedding(frame)
+
+    def _extract_embedding(self, frame) -> Optional[list[float]]:
+        if frame is None or not self._loaded or self.app is None:
             return None
         try:
             detected = self.app.get(frame)
@@ -99,15 +122,17 @@ class FaceEngine:
         if frame is None:
             return []
 
-        if self.app is not None:
-            return self._real_process(frame)
-        return self._mock_process()
+        with self._lock:
+            if self._loaded and self.app is not None:
+                return self._real_process(frame)
+            return []
 
     def _real_process(self, frame) -> list[dict]:
         assert self.app is not None
         faces = []
         try:
             detected = self.app.get(frame)
+            self.last_error = None
             for face in detected:
                 embedding = face.normed_embedding
                 person_id, person_name, score, alert_message, alert_enabled = self._match(embedding)
@@ -121,23 +146,10 @@ class FaceEngine:
                     "alert_enabled": alert_enabled,
                 })
         except Exception as e:
+            self.last_error = "INFERENCE_FAILED"
             logger.error(f"Face processing error: {e}")
+            return []
         return faces
-
-    def _mock_process(self) -> list[dict]:
-        """Synthetic face event — fires ~5% of the time."""
-        if np.random.random() > 0.95:
-            is_known = np.random.random() > 0.5
-            return [{
-                "is_known": is_known,
-                "person_id": "mock-person-1" if is_known else None,
-                "person_name": "Test Person" if is_known else None,
-                "confidence": round(np.random.uniform(0.7, 0.99), 3),
-                "bbox": [100, 80, 200, 200],
-                "alert_message": "Mock alert: Test Person has arrived!" if is_known else None,
-                "alert_enabled": is_known,
-            }]
-        return []
 
     def _match(self, embedding: np.ndarray) -> tuple[Optional[str], Optional[str], float, Optional[str], bool]:
         """Cosine similarity match against known faces."""
