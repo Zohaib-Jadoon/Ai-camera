@@ -369,10 +369,12 @@ class PPEDetector:
                         hat_region = frame[hat_y1:hat_y2, hat_x1:hat_x2]
                         if hat_region.size > 0:
                             hsv = cv2.cvtColor(hat_region, cv2.COLOR_BGR2HSV)
-                            # Hard hats are typically bright, saturated colors
-                            bright_mask = cv2.inRange(hsv, (0, 80, 120), (180, 255, 255))
+                            # Hard hats are typically bright, saturated colors or clean white
+                            colored_mask = cv2.inRange(hsv, (0, 70, 110), (180, 255, 255))
+                            white_mask = cv2.inRange(hsv, (0, 0, 185), (180, 55, 255))
+                            bright_mask = cv2.bitwise_or(colored_mask, white_mask)
                             bright_ratio = np.count_nonzero(bright_mask) / max(bright_mask.size, 1)
-                            if bright_ratio < 0.25:
+                            if bright_ratio < 0.20:
                                 violations.append("NO_HARDHAT")
 
             # ── High-vis vest check ───────────────────────────────────────
@@ -382,15 +384,12 @@ class PPEDetector:
                 lh = _kp(kps, L_HIP)
                 rh = _kp(kps, R_HIP)
                 if all([ls, rs, lh, rh]) and min(ls[2], rs[2], lh[2], rh[2]) > 0.3:  # type: ignore
-                    torso_y1 = int(min(ls[1], rs[1]))  # type: ignore
-                    torso_y2 = int(max(lh[1], rh[1]))  # type: ignore
-                    torso_x1 = int(min(ls[0], lh[0]))  # type: ignore
-                    torso_x2 = int(max(rs[0], rh[0]))  # type: ignore
-
-                    torso_y1 = max(0, torso_y1)
-                    torso_x1 = max(0, torso_x1)
-                    torso_y2 = min(frame.shape[0], torso_y2)
-                    torso_x2 = min(frame.shape[1], torso_x2)
+                    all_xs = [ls[0], rs[0], lh[0], rh[0]]  # type: ignore
+                    all_ys = [ls[1], rs[1], lh[1], rh[1]]  # type: ignore
+                    torso_y1 = max(0, int(min(all_ys)))
+                    torso_y2 = min(frame.shape[0], int(max(all_ys)))
+                    torso_x1 = max(0, int(min(all_xs)))
+                    torso_x2 = min(frame.shape[1], int(max(all_xs)))
 
                     if torso_y2 > torso_y1 and torso_x2 > torso_x1:
                         torso_region = frame[torso_y1:torso_y2, torso_x1:torso_x2]

@@ -41,8 +41,8 @@ logger = logging.getLogger(__name__)
 _MAX_DISAPPEARED = 5
 
 # Maximum centroid distance (pixels) for a match to be accepted.
-# Frigate uses 100 for a 1080p stream; scale down for smaller frames.
-_MAX_CENTROID_DISTANCE = 150.0
+# Expanded to 280.0 px for 1080p full-HD surveillance streams (handgun / limb motions)
+_MAX_CENTROID_DISTANCE = 280.0
 
 # IoU fallback threshold (used when scipy is not installed)
 _MIN_IOU = 0.25
@@ -279,7 +279,8 @@ class CentroidTracker:
         for tid, track in self._tracks.items():
             if tid not in matched_track_ids:
                 track.disappeared += 1
-                if track.disappeared > self.max_disappeared:
+                limit = 15 if track.object_type in ('weapon', 'knife', 'gun', 'fire', 'flame') else self.max_disappeared
+                if track.disappeared > limit:
                     to_prune.append(tid)
         if to_prune:
             for tid in to_prune:
@@ -331,7 +332,7 @@ class CentroidTracker:
         """Age all tracks by one frame (called when no detections arrive)."""
         to_prune = [
             tid for tid, t in self._tracks.items()
-            if t.disappeared >= self.max_disappeared
+            if t.disappeared >= (15 if t.object_type in ('weapon', 'knife', 'gun', 'fire', 'flame') else self.max_disappeared)
         ]
         for tid in to_prune:
             del self._tracks[tid]

@@ -1,7 +1,29 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
-const DASHBOARD_PREFIX = ['/dashboard', '/cameras', '/live', '/alerts', '/analytics', '/events', '/faces', '/zones', '/settings'];
+const DASHBOARD_PREFIX = [
+  '/dashboard',
+  '/cameras',
+  '/live',
+  '/alerts',
+  '/analytics',
+  '/events',
+  '/faces',
+  '/zones',
+  '/settings',
+  '/training',
+  '/alert-rules',
+  '/calibration',
+  '/camera-groups',
+  '/escalation',
+  '/forecast',
+  '/recordings',
+  '/reid',
+  '/safety',
+  '/traffic',
+  '/users',
+  '/webhooks',
+];
 const AUTH_PATHS = ['/login', '/register', '/forgot-password', '/reset-password'];
 
 function isAuthenticated(req: NextRequest): boolean {

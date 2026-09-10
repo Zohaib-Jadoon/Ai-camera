@@ -109,7 +109,7 @@ export default function ZoneCanvas({
   // ── coordinate helpers ───────────────────────────────────────────────────
 
   const toNorm = useCallback(
-    (px: number, py: number): Point => [px / size.w, py / size.h],
+    (px: number, py: number): Point => [px / (size.w || 1), py / (size.h || 1)],
     [size],
   );
 

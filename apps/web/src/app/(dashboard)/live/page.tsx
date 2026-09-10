@@ -302,14 +302,20 @@ export default function LiveMonitoring() {
       ].some(t => objType.includes(t));
 
       if (isThreat && payload.camera_id) {
-        triggerThreat(payload.camera_id, objType, payload.message || `⚠️ ${objType} Detected`);
+        const isWeapon = ['WEAPON', 'KNIFE', 'GUN', 'BAT', 'PISTOL', 'RIFLE', 'SWORD', 'AXE', 'BLADE', 'DAGGER', 'MACHETE', 'SCISSORS'].some(w => objType.includes(w));
+        const displayType = isWeapon ? 'WEAPON' : objType;
+        const msg = isWeapon ? '⚠️ Weapon Detected' : (payload.message || `⚠️ ${displayType} Detected`);
+        triggerThreat(payload.camera_id, displayType, msg);
       }
     };
 
     const threatHandler = (payload: any) => {
       const objType = (payload.object_type || (payload.alert_type === 'FIRE_DETECTED' ? 'FIRE' : 'WEAPON')).toUpperCase();
       const isFire = ['FIRE', 'FLAME', 'SMOKE', 'LIGHTER', 'FIRE_DETECTED'].some(t => objType.includes(t));
-      triggerThreat(payload.camera_id, objType, payload.message || (isFire ? `🔥 CRITICAL: FIRE DETECTED` : `⚠️ CRITICAL: ${objType} DETECTED`));
+      const isWeapon = ['WEAPON', 'KNIFE', 'GUN', 'BAT', 'PISTOL', 'RIFLE', 'SWORD', 'AXE', 'BLADE', 'DAGGER', 'MACHETE', 'SCISSORS', 'WEAPON_DETECTED'].some(t => objType.includes(t));
+      const displayLabel = isFire ? 'FIRE' : (isWeapon ? 'WEAPON' : objType);
+      const message = payload.message || (isFire ? `🔥 CRITICAL: FIRE DETECTED` : (isWeapon ? `⚠️ CRITICAL: WEAPON DETECTED` : `⚠️ CRITICAL: ${objType} DETECTED`));
+      triggerThreat(payload.camera_id, displayLabel, message);
     };
 
     const congestionHandler = (payload: any) => {
@@ -329,7 +335,11 @@ export default function LiveMonitoring() {
     const handleIncomingDetection = (payload: any) => {
       if (!payload) return;
       const camId = payload.camera_id;
-      const objType = (payload.object_type || payload.alert_type || 'object').toLowerCase();
+      let objType = (payload.object_type || payload.alert_type || 'object').toLowerCase();
+      const isWeapon = ['weapon', 'knife', 'gun', 'bat', 'pistol', 'rifle', 'sword', 'axe', 'blade', 'dagger', 'machete', 'scissors'].some(w => objType.includes(w));
+      if (isWeapon) {
+        objType = 'weapon';
+      }
       const newEv = {
         id: payload.detection_id || payload.id || `live-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         camera_id: camId,

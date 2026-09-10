@@ -19,6 +19,7 @@ import pathlib
 import tempfile
 import cv2
 import numpy as np
+from src.fire_detector import FireDetector
 
 # Safe weights & config paths for Ultralytics & CLIP downloads
 try:
@@ -140,18 +141,19 @@ DEFAULT_OBJECT_FILTERS: dict[str, ObjectFilterConfig] = {
     # Baggage
     "backpack":     ObjectFilterConfig(min_area=100,   max_area=500_000),
     "suitcase":     ObjectFilterConfig(min_area=200,   max_area=500_000),
-    # Small threat, weapon & fire objects — low min_score (0.15-0.18) and min_area (15px) for instant detection
-    "knife":        ObjectFilterConfig(min_area=15,    max_area=400_000,  min_score=0.18),
-    "blade":        ObjectFilterConfig(min_area=15,    max_area=400_000,  min_score=0.18),
-    "dagger":       ObjectFilterConfig(min_area=15,    max_area=400_000,  min_score=0.18),
-    "machete":      ObjectFilterConfig(min_area=25,    max_area=500_000,  min_score=0.18),
-    "gun":          ObjectFilterConfig(min_area=20,    max_area=600_000,  min_score=0.20),
-    "handgun":      ObjectFilterConfig(min_area=20,    max_area=600_000,  min_score=0.20),
-    "pistol":       ObjectFilterConfig(min_area=20,    max_area=600_000,  min_score=0.20),
-    "rifle":        ObjectFilterConfig(min_area=30,    max_area=800_000,  min_score=0.20),
-    "firearm":      ObjectFilterConfig(min_area=20,    max_area=800_000,  min_score=0.20),
-    "weapon":       ObjectFilterConfig(min_area=20,    max_area=800_000,  min_score=0.20),
-    "sword":        ObjectFilterConfig(min_area=30,    max_area=800_000,  min_score=0.20),
+    # Small threat, weapon & fire objects — low min_score (0.15) and min_area (15px) for instant detection
+    "knife":        ObjectFilterConfig(min_area=15,    max_area=400_000,  min_score=0.15),
+    "blade":        ObjectFilterConfig(min_area=15,    max_area=400_000,  min_score=0.15),
+    "dagger":       ObjectFilterConfig(min_area=15,    max_area=400_000,  min_score=0.15),
+    "machete":      ObjectFilterConfig(min_area=25,    max_area=500_000,  min_score=0.15),
+    "gun":          ObjectFilterConfig(min_area=20,    max_area=600_000,  min_score=0.15),
+    "handgun":      ObjectFilterConfig(min_area=20,    max_area=600_000,  min_score=0.15),
+    "pistol":       ObjectFilterConfig(min_area=20,    max_area=600_000,  min_score=0.15),
+    "rifle":        ObjectFilterConfig(min_area=30,    max_area=800_000,  min_score=0.15),
+    "firearm":      ObjectFilterConfig(min_area=20,    max_area=800_000,  min_score=0.15),
+    "weapon":       ObjectFilterConfig(min_area=15,    max_area=1_200_000, min_score=0.15),
+    "sword":        ObjectFilterConfig(min_area=30,    max_area=800_000,  min_score=0.15),
+    "scissors":     ObjectFilterConfig(min_area=15,    max_area=400_000,  min_score=0.15),
     # Bat: requires realistic size (>1500px) and score (0.45) so pens/hands/lighters are NEVER mistaken for bats
     "bat":          ObjectFilterConfig(min_area=1500,  max_area=800_000,  min_score=0.45),
     "baseball bat": ObjectFilterConfig(min_area=1500,  max_area=800_000,  min_score=0.45),
@@ -160,8 +162,12 @@ DEFAULT_OBJECT_FILTERS: dict[str, ObjectFilterConfig] = {
     "flame":        ObjectFilterConfig(min_area=15,    max_area=1_200_000, min_score=0.15),
     "smoke":        ObjectFilterConfig(min_area=30,    max_area=1_200_000, min_score=0.15),
     "lighter":      ObjectFilterConfig(min_area=15,    max_area=300_000,  min_score=0.15),
-    # Strict cell phone filter to prevent handheld lighters/fire from being classified as phone
-    "cell phone":   ObjectFilterConfig(min_area=1500,  max_area=200_000,  min_score=0.80),
+    # Hand / limb for intrusion detection
+    "hand":         ObjectFilterConfig(min_area=25,    max_area=500_000,  min_score=0.18),
+    # Everyday inspection objects
+    "cell phone":   ObjectFilterConfig(min_area=40,    max_area=400_000,  min_score=0.22),
+    "bottle":       ObjectFilterConfig(min_area=40,    max_area=500_000,  min_score=0.25),
+    "cup":          ObjectFilterConfig(min_area=30,    max_area=400_000,  min_score=0.25),
     # Animals
     "dog":          ObjectFilterConfig(min_area=500,   max_area=600_000),
     "cat":          ObjectFilterConfig(min_area=300,   max_area=300_000),
@@ -194,7 +200,8 @@ def apply_object_filters(
     kept: list[dict] = []
     for det in detections:
         label = det.get('object_type', '')
-        cfg   = filters.get(label)
+        raw_label = det.get('raw_label', '')
+        cfg = filters.get(raw_label) if raw_label in filters else filters.get(label)
         if cfg is None:
             kept.append(det)   # unknown label — pass through unfiltered
             continue
@@ -242,15 +249,18 @@ except ImportError:
 
 
 # Open-Vocabulary descriptive prompt classes for YOLO-World
-# Notice: 'cell phone', 'laptop', 'remote', 'scissors' omitted to eliminate false positives on hands/pens/lighters
 WORLD_PROMPT_CLASSES = [
     'person',
     # Threat & weapon class names
     'knife', 'pocket knife', 'kitchen knife', 'utility knife', 'box cutter', 'craft knife', 'blade', 'dagger', 'machete', 'scissors',
-    'gun', 'handgun', 'pistol', 'rifle', 'firearm', 'weapon', 'sword',
+    'gun', 'handgun', 'black handgun', 'firearm held in hand', 'pistol', 'rifle', 'firearm', 'weapon', 'sword',
     'bat', 'baseball bat',
     # Fire & hazard classes — descriptive prompts maximize open-vocabulary activation
     'fire', 'flame', 'open flame', 'burning flame', 'lighter', 'cigarette lighter', 'flint lighter', 'smoke',
+    # Human limb / hand for intrusion detection
+    'hand', 'human hand', 'arm',
+    # Everyday inspection objects
+    'cell phone', 'smart phone', 'bottle', 'cup',
     # Common surveillance objects
     'car', 'motorcycle', 'bus', 'truck', 'bicycle',
     'dog', 'cat', 'backpack', 'suitcase',
@@ -271,18 +281,31 @@ CANONICAL_LABEL_MAP: dict[str, str] = {
     'blade': 'knife',
     'dagger': 'knife',
     'machete': 'knife',
+    'black handgun': 'gun',
+    'firearm held in hand': 'gun',
     'handgun': 'gun',
     'pistol': 'gun',
     'firearm': 'gun',
+    'human hand': 'hand',
+    'arm': 'hand',
+    'smart phone': 'cell phone',
 }
 
 SURVEILLANCE_CLASSES = set(WORLD_PROMPT_CLASSES) | set(CANONICAL_LABEL_MAP.values())
+
+# Unified weapon categories for generalized threat reporting
+WEAPON_CLASSES = frozenset([
+    'knife', 'pocket knife', 'kitchen knife', 'utility knife', 'box cutter',
+    'craft knife', 'blade', 'dagger', 'machete',
+    'gun', 'handgun', 'black handgun', 'firearm held in hand', 'pistol', 'rifle', 'firearm', 'weapon',
+    'bat', 'baseball bat', 'sword', 'axe', 'scissors',
+])
 
 
 def _setup_world_classes_if_needed(model, model_name: str):
     if model is not None and 'world' in model_name.lower():
         model.set_classes(WORLD_PROMPT_CLASSES)
-        logger.info('YOLO-World classes configured with %d categories (including fire, weapons, knives)', len(WORLD_PROMPT_CLASSES))
+        logger.info('YOLO-World classes configured with %d categories (including fire, weapons, knives, hands, everyday objects)', len(WORLD_PROMPT_CLASSES))
 
 
 class Detector:
@@ -301,6 +324,7 @@ class Detector:
         self.tracker_type = tracker_type
         self.model: Optional["YOLO"] = None
         self.device = os.getenv('YOLO_DEVICE', 'auto')
+        self.fire_detector = FireDetector()
 
         if YOLO_AVAILABLE:
             try:
@@ -349,10 +373,54 @@ class Detector:
         if frame is None or not self._loaded:
             return []
 
-        model = self.model
-        if model is None:
-            return []
-        return self._yolo_detect(frame, model)
+        with self._lock:
+            model = self.model
+            if model is None:
+                return []
+            yolo_dets = self._yolo_detect(frame)
+
+        # Detect fire, flames, and lighter fires of all sizes
+        try:
+            fire_dets = self.fire_detector.detect(frame)
+        except Exception as e:
+            logger.debug(f"Fire detection error: {e}")
+            fire_dets = []
+
+        if not fire_dets:
+            return yolo_dets
+        if not yolo_dets:
+            return fire_dets
+
+        # Merge fire detections into yolo detections with spatial deduplication
+        combined = list(yolo_dets)
+        for fd in fire_dets:
+            fb = fd["box"]
+            has_overlap = False
+            for yd in combined:
+                if yd.get("object_type") == "fire":
+                    yb = yd["box"]
+                    ix1 = max(fb[0], yb[0])
+                    iy1 = max(fb[1], yb[1])
+                    ix2 = min(fb[2], yb[2])
+                    iy2 = min(fb[3], yb[3])
+                    iw = max(0.0, ix2 - ix1)
+                    ih = max(0.0, iy2 - iy1)
+                    inter = iw * ih
+                    a1 = (fb[2] - fb[0]) * (fb[3] - fb[1])
+                    a2 = (yb[2] - yb[0]) * (yb[3] - yb[1])
+                    union = a1 + a2 - inter
+                    if union > 0 and (inter / union) >= 0.25:
+                        has_overlap = True
+                        if fd["confidence"] > yd.get("confidence", 0):
+                            yd["confidence"] = fd["confidence"]
+                            yd["box"] = fb
+                            yd["display_name"] = fd["display_name"]
+                            yd["raw_label"] = fd["raw_label"]
+                        break
+            if not has_overlap:
+                combined.append(fd)
+
+        return combined
 
     def _yolo_detect(self, frame, model=None) -> list[dict]:
         m = model or self.model
@@ -398,7 +466,8 @@ class Detector:
                     # and apply_object_filters will enforce per-label min_score.
                     # For all other classes, apply the global threshold here.
                     is_threat_label = label in THREAT_CLASSES or raw_label in THREAT_CLASSES
-                    if not is_threat_label and conf < self.confidence:
+                    is_sensitive_label = is_threat_label or label in ('hand', 'cell phone', 'bottle', 'cup') or raw_label in ('hand', 'human hand', 'arm')
+                    if not is_sensitive_label and conf < self.confidence:
                         continue
 
                     x1, y1, x2, y2 = [float(v) for v in box.xyxy[0]]
@@ -407,11 +476,17 @@ class Detector:
                     if box.id is not None:
                         track_id = int(box.id[0])
 
+                    # Generalize weapon detection: knife, baseball bat, guns, etc. -> 'weapon'
+                    is_weapon = label in WEAPON_CLASSES or raw_label in WEAPON_CLASSES
+                    output_type = 'weapon' if is_weapon else label
+
                     det = {
-                        'object_type': label,
+                        'object_type': output_type,
+                        'raw_label': raw_label,
                         'confidence': round(conf, 3),
                         'box': [x1, y1, x2, y2],
                         'track_id': track_id,
+                        'display_name': 'Weapon Detected' if is_weapon else output_type.title(),
                     }
 
                     # Add Pose Estimation keypoints if model supports it (yolov8n-pose.pt)

@@ -30,6 +30,7 @@ import {
   Webhook,
   Zap,
   UserCog,
+  Brain,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuthStore, type UserRole } from '@/store/auth-store';
@@ -55,6 +56,7 @@ export const navItems: NavItem[] = [
   { name: 'Cameras',          href: '/cameras',       icon: Camera },
   { name: 'Camera Groups',    href: '/camera-groups', icon: LayoutGrid },
   { name: 'Calibration',      href: '/calibration',   icon: SlidersHorizontal, minRole: 'SECURITY_OPERATOR' },
+  { name: 'Model Training',   href: '/training',      icon: Brain,             minRole: 'SECURITY_OPERATOR' },
   { name: 'AI Events',        href: '/events',        icon: History },
   { name: 'Alerts',           href: '/alerts',        icon: Bell },
   { name: 'Alert Rules',      href: '/alert-rules',   icon: ShieldAlert,       minRole: 'SECURITY_OPERATOR' },

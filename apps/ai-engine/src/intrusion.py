@@ -10,6 +10,7 @@ Key changes vs original:
 - Emits per-zone events with metadata so the backend can log which zone fired.
 """
 
+import time
 import logging
 import numpy as np
 
@@ -42,6 +43,7 @@ class IntrusionDetector:
 
     def __init__(self):
         self.zones: list = []
+        self.loiter_tracker: dict[tuple[str, str], float] = {}
 
     def update_zones(self, zones: list):
         self.zones = zones
@@ -50,6 +52,9 @@ class IntrusionDetector:
     def check(self, detections: list, frame_width: int = 640, frame_height: int = 360) -> list:
         """
         Check if any detected objects fall within configured zones.
+
+        Evaluates multi-point containment (centroid, corners, keypoints/wrists)
+        and box-polygon intersection to reliably catch reach-in, hand, and upper-body intrusions.
 
         Args:
             detections:   List of detection dicts from the AI engine.
@@ -61,6 +66,8 @@ class IntrusionDetector:
                                        object_type, confidence, track_id }
         """
         intrusions = []
+        now = time.monotonic()
+        active_in_zones: set[tuple[str, str]] = set()
 
         for det in detections:
             # Tracker outputs 'box'; raw detector uses 'bbox' — accept both
@@ -68,19 +75,44 @@ class IntrusionDetector:
             if len(bbox) < 4:
                 continue
 
-            # Use the bottom-centre of the bounding box as the test point
-            # (same as Frigate — prevents false positives when only part of
-            # the object overlaps the zone boundary)
-            cx = (bbox[0] + bbox[2]) / 2
-            cy = bbox[3]  # bottom edge
-            
+            x1, y1, x2, y2 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+            cx = (x1 + x2) / 2.0
+            cy = (y1 + y2) / 2.0
+
             prev_bbox = det.get('prev_box', bbox)
-            prev_cx = (prev_bbox[0] + prev_bbox[2]) / 2
-            prev_cy = prev_bbox[3]
+            prev_cx = (prev_bbox[0] + prev_bbox[2]) / 2.0
+            prev_cy = (prev_bbox[1] + prev_bbox[3]) / 2.0
+
+            track_id = str(det.get('track_id') or det.get('object_type') or 'unknown')
+
+            # Multi-point candidate points for robust boundary testing
+            test_points: list[tuple[float, float]] = [
+                (cx, cy),                # Centroid
+                (cx, y2),                # Bottom-center (ground plane / feet)
+                (cx, y1),                # Top-center (head / upper body)
+                (x1, cy),                # Left-center
+                (x2, cy),                # Right-center
+                (x1, y1), (x2, y1),      # Top corners
+                (x1, y2), (x2, y2),      # Bottom corners
+            ]
+
+            # If pose keypoints exist (e.g. wrists, elbows, hands), include high-confidence keypoints
+            keypoints = det.get('keypoints')
+            if keypoints and isinstance(keypoints, (list, tuple)):
+                # Keypoints index 9 & 10 are wrists (hands), 7 & 8 are elbows
+                for kp_idx in (9, 10, 7, 8):
+                    if len(keypoints) > kp_idx:
+                        kp = keypoints[kp_idx]
+                        if len(kp) >= 2:
+                            kpx, kpy = float(kp[0]), float(kp[1])
+                            kp_conf = float(kp[2]) if len(kp) >= 3 else 1.0
+                            if kp_conf >= 0.2 and kpx > 0 and kpy > 0:
+                                test_points.append((kpx, kpy))
 
             for zone in self.zones:
                 polygon = self._extract_polygon(zone, frame_width, frame_height)
                 rule_type = zone.get('rule_type', 'intrusion')
+                zone_id = str(zone.get('id') or 'default')
 
                 if rule_type == 'line_crossing':
                     if len(polygon) < 2:
@@ -100,15 +132,52 @@ class IntrusionDetector:
                     if len(polygon) < 3:
                         continue
 
-                    if self._point_in_polygon(cx, cy, polygon):
-                        intrusions.append({
-                            'zone_id':     zone.get('id'),
-                            'zone_name':   zone.get('name', rule_type),
-                            'rule_type':   rule_type,
-                            'object_type': det.get('object_type', 'unknown'),
-                            'confidence':  det.get('confidence', 0.0),
-                            'track_id':    det.get('track_id'),
-                        })
+                    # 1. Check if any test point is inside polygon
+                    is_inside = any(self._point_in_polygon(px, py, polygon) for px, py in test_points)
+
+                    # 2. Check if polygon vertices fall inside bounding box
+                    if not is_inside:
+                        is_inside = any(x1 <= px <= x2 and y1 <= py <= y2 for px, py in polygon)
+
+                    # 3. Check if bounding box perimeter intersects polygon perimeter
+                    if not is_inside:
+                        is_inside = self._box_intersects_polygon((x1, y1, x2, y2), polygon)
+
+                    if is_inside:
+                        active_in_zones.add((track_id, zone_id))
+
+                        if rule_type == 'loitering':
+                            # Dwell-time gate: only alert if object has stayed >= threshold
+                            dwell_key = (track_id, zone_id)
+                            first_seen = self.loiter_tracker.setdefault(dwell_key, now)
+                            dwell_time = now - first_seen
+                            dwell_threshold = float(zone.get('loitering_threshold', 3.0))
+
+                            if dwell_time >= dwell_threshold:
+                                intrusions.append({
+                                    'zone_id':     zone.get('id'),
+                                    'zone_name':   zone.get('name', rule_type),
+                                    'rule_type':   rule_type,
+                                    'object_type': det.get('object_type', 'unknown'),
+                                    'confidence':  det.get('confidence', 0.0),
+                                    'track_id':    det.get('track_id'),
+                                    'dwell_time':  round(dwell_time, 1),
+                                })
+                        else:
+                            # Immediate intrusion alert
+                            intrusions.append({
+                                'zone_id':     zone.get('id'),
+                                'zone_name':   zone.get('name', rule_type),
+                                'rule_type':   rule_type,
+                                'object_type': det.get('object_type', 'unknown'),
+                                'confidence':  det.get('confidence', 0.0),
+                                'track_id':    det.get('track_id'),
+                            })
+
+        # Prune loiter tracker for objects that have left the zone
+        for k in list(self.loiter_tracker.keys()):
+            if k not in active_in_zones:
+                self.loiter_tracker.pop(k, None)
 
         return intrusions
 
@@ -125,7 +194,12 @@ class IntrusionDetector:
           2. [{"x": x, "y": y}]  ← legacy JSON object format
           3. {"points": [[x,y]]}  ← old DTO wrapper format
         """
-        raw = zone.get('polygon_points', zone.get('polygon', None))
+        raw = (
+            zone.get('polygon_points')
+            or zone.get('polygon')
+            or zone.get('points')
+            or zone.get('coordinates')
+        )
 
         # Unwrap old {"points": [...]} wrapper
         if isinstance(raw, dict) and 'points' in raw:
@@ -194,3 +268,21 @@ class IntrusionDetector:
         def ccw(A, B, C):
             return (C[1]-A[1]) * (B[0]-A[0]) > (B[1]-A[1]) * (C[0]-A[0])
         return ccw(p1, p3, p4) != ccw(p2, p3, p4) and ccw(p1, p2, p3) != ccw(p1, p2, p4)
+
+    def _box_intersects_polygon(self, box: tuple[float, float, float, float], polygon: list[tuple[float, float]]) -> bool:
+        """Check if any of the 4 bounding box edges intersect with any edge of the polygon."""
+        x1, y1, x2, y2 = box
+        box_segments = [
+            ((x1, y1), (x2, y1)),
+            ((x2, y1), (x2, y2)),
+            ((x2, y2), (x1, y2)),
+            ((x1, y2), (x1, y1)),
+        ]
+        n = len(polygon)
+        for i in range(n):
+            poly_seg = (polygon[i], polygon[(i + 1) % n])
+            for b1, b2 in box_segments:
+                if self._segments_intersect(b1, b2, poly_seg[0], poly_seg[1]):
+                    return True
+        return False
+

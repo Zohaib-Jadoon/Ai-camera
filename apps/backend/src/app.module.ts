@@ -31,6 +31,7 @@ import { WebhooksModule } from './webhooks/webhooks.module';
 import { EscalationModule } from './escalation/escalation.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { CameraGroupsModule } from './camera-groups/camera-groups.module';
+import { TrainingModule } from './training/training.module';
 import { RolesGuard } from './auth/roles.guard';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import * as Joi from 'joi';
@@ -104,6 +105,7 @@ import * as Joi from 'joi';
     EscalationModule,
     NotificationsModule,
     CameraGroupsModule,
+    TrainingModule,
   ],
   controllers: [AppController, ReadinessController],
   providers: [

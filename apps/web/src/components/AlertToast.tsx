@@ -108,7 +108,10 @@ export default function AlertToast() {
           : new Date().toLocaleTimeString(),
       };
 
-      setAlerts((prev) => [toast, ...prev].slice(0, 6));
+      setAlerts((prev) => {
+        if (prev.some((a) => a.id === toastId)) return prev;
+        return [toast, ...prev].slice(0, 6);
+      });
 
       const criticalTypes = [
         'INTRUSION',

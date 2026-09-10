@@ -228,10 +228,20 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
       this.logger.error(`Failed to persist intrusion alert: ${err.message}`);
     }
 
-    this.server.emit('alert', {
+    const eventId = `intrusion-${payload.camera_id}-${payload.zone_id || 'all'}-${Date.now()}`;
+    const enrichedPayload = {
       ...payload,
+      id: eventId,
+      alertId: eventId,
       object_type: 'INTRUSION',
-    });
+      alert_type: 'INTRUSION',
+      event_type: 'INTRUSION',
+      breach_object: payload.object_type || 'object',
+    };
+
+    // Emit both 'intrusion' (for live page banner & dedicated toast) and 'alert' (for global dashboard)
+    this.server.emit('intrusion', enrichedPayload);
+    this.server.emit('alert', enrichedPayload);
   }
 
   @SubscribeMessage('join-camera')
@@ -529,22 +539,30 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect, 
   @SubscribeMessage('threat_alert')
   async handleThreatAlert(_client: Socket, payload: any): Promise<void> {
     if (!this.verifyAiEngine(_client)) return;
-    const objType = payload?.object_type || 'UNKNOWN_THREAT';
+    const rawType = (payload?.object_type || 'WEAPON').toUpperCase();
+    const isFire = ['FIRE', 'FLAME', 'SMOKE', 'LIGHTER'].some(f => rawType.includes(f));
+    const isWeapon = ['WEAPON', 'KNIFE', 'GUN', 'BAT', 'PISTOL', 'RIFLE', 'SWORD', 'AXE', 'BLADE', 'DAGGER', 'MACHETE', 'SCISSORS'].some(w => rawType.includes(w));
+    const objType = isFire ? 'FIRE' : (isWeapon ? 'WEAPON' : rawType);
+    const alertType = payload?.alert_type || (isFire ? 'FIRE_DETECTED' : (isWeapon ? 'WEAPON_DETECTED' : 'THREAT_DETECTED'));
+    const message = payload?.message || (isFire ? '🔥 Fire Detected' : (isWeapon ? '⚠️ Weapon Detected' : '⚠️ Threat Detected'));
+    const alertTitle = payload?.alert_title || (isFire ? '🔥 FIRE DETECTED' : (isWeapon ? '⚠️ WEAPON DETECTED' : `⚠️ ${objType} DETECTED`));
     const camId = payload?.camera_id;
-    this.logger.warn(`🚨 THREAT ALERT: ${objType} cam=${camId} severity=${payload?.severity}`);
+    this.logger.warn(`🚨 THREAT ALERT: ${objType} (${alertType}) cam=${camId} severity=${payload?.severity || 'CRITICAL'}`);
 
     // Broadcast immediately to all web clients so UI can flash red + sound siren
     this.server.emit('threat_alert', {
       ...payload,
       object_type: objType,
-      alert_type: payload?.alert_type || 'WEAPON_DETECTED',
+      alert_type: alertType,
+      alert_title: alertTitle,
+      message,
       severity: payload?.severity || 'CRITICAL',
     });
 
     // Persist alert to DB asynchronously (don't await — don't block the hot path)
     this.alertsService.create({
       event_id: `threat-${camId}-${Date.now()}`,
-      alert_type: payload?.alert_type || 'WEAPON_DETECTED',
+      alert_type: alertType,
       camera_id: camId,
       object_type: objType,
     }).catch((err) => this.logger.error(`Failed to persist threat alert: ${err.message}`));

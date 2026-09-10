@@ -103,13 +103,15 @@ export class AlertsService {
     }
 
     // ── Cooldown / deduplication (Redis-backed, survives restarts) ─────────
-    const cooldownKey = `alert:cooldown:${data.camera_id || 'global'}:${data.alert_type}`;
+    const isIntrusion = data.alert_type === 'INTRUSION';
+    const cooldownKey = `alert:cooldown:${data.camera_id || 'global'}:${data.zone_id || 'all'}:${data.alert_type}`;
     const cached = await this.cache.get(cooldownKey);
     if (cached) {
       this.logger.debug(`Alert cooldown active for ${cooldownKey} — skipping`);
       return null;
     }
-    await this.cache.set(cooldownKey, true, this.COOLDOWN_MS);
+    const cooldownDuration = isIntrusion ? 5_000 : this.COOLDOWN_MS;
+    await this.cache.set(cooldownKey, true, cooldownDuration);
 
     let alertData: typeof data & { severity: AlertSeverity } = {
       ...data,
